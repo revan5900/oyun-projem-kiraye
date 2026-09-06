@@ -1,0 +1,1188 @@
+<!doctype html>
+<html lang="az">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Ureyimsen — Canlı</title>
+<style>
+  :root{
+    --bg-0:#0B0B12; --bg-1:#14141F; --card:#1B1B29; --card-hi:#22222F;
+    --line:rgba(255,255,255,0.08); --accent:#7C5CFF; --accent-2:#FF4D8D;
+    --gold:#FFC24D; --ink:#F2F1F8; --muted:#9A97AF;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;}
+  body{background:radial-gradient(1000px 600px at 20% -10%, #2a1f4d 0%, transparent 55%), var(--bg-0);
+    color:var(--ink); font-family:'Segoe UI',system-ui,sans-serif; min-height:100vh; overflow-x:hidden;}
+  a{color:inherit;text-decoration:none;}
+
+  .toast{position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(20px); background:rgba(0,0,0,0.85);
+    color:#fff; padding:11px 20px; border-radius:14px; font-size:13px; font-weight:600; z-index:999; opacity:0; transition:.25s; pointer-events:none;}
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+
+    #browse-view{max-width:460px; margin:0 auto; padding:24px 20px 90px;}
+  .browse-topbar{display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;}
+  .browse-topbar h1{font-size:22px;font-weight:900;margin:0;padding:10px 18px;border:1px solid #ffffff3d;border-radius:18px;background:linear-gradient(120deg,#ffffff20,#8fdcff12);backdrop-filter:blur(16px);box-shadow:inset 0 1px #ffffff55,0 10px 30px #0005;position:relative;overflow:hidden}
+  .browse-topbar h1:after,.ice-title:after{content:"";position:absolute;inset:-80% -30%;background:linear-gradient(105deg,transparent 38%,#ffffff70 49%,transparent 60%);animation:iceShine 3.6s linear infinite;pointer-events:none}
+  @keyframes iceShine{from{transform:translateX(-70%)}to{transform:translateX(70%)}}
+  .go-live-fab{display:flex; align-items:center; justify-content:center; gap:8px;background:linear-gradient(120deg,var(--gold),#ffb020); color:#0B0B12;font-weight:800; font-size:14px; padding:13px; border-radius:14px; cursor:pointer;box-shadow:0 12px 26px -10px rgba(255,194,77,0.5); margin-bottom:22px;}
+  .live-grid{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+  .live-card{background:linear-gradient(180deg,var(--card-hi),var(--card));border:1px solid var(--line); border-radius:16px; overflow:hidden; cursor:pointer; position:relative;}
+  .live-card .thumb{height:150px; background:linear-gradient(155deg,#2a2244,#1a1628);display:flex; align-items:center; justify-content:center; position:relative;}
+  .live-card .thumb img{width:100%;height:100%;object-fit:cover;}
+  .live-badge{position:absolute; top:8px; left:8px; background:var(--accent-2); color:#fff;font-size:10px; font-weight:800; padding:3px 8px; border-radius:6px; letter-spacing:.4px;}
+  .live-viewers{position:absolute; bottom:8px; right:8px; background:rgba(0,0,0,0.55); color:#fff;font-size:11px; font-weight:700; padding:3px 8px; border-radius:8px; display:flex; align-items:center; gap:4px;}
+  .seat-count-badge{position:absolute; top:8px; right:8px; background:rgba(0,0,0,0.55); color:#fff; font-size:10px; font-weight:800; padding:3px 7px; border-radius:6px;}
+  .live-card .info{padding:10px 12px;}
+  .live-card .name{font-size:13px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .browse-empty{text-align:center; padding:60px 20px; color:var(--muted); font-size:13.5px;}
+  .back-btn{width:36px;height:36px;border-radius:11px;background:rgba(255,255,255,0.05);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;color:var(--muted);cursor:pointer; font-size:16px;}
+  .rank-tabs{display:flex;gap:7px;padding:10px 0 14px}.rank-tabs button{flex:1;border:1px solid var(--line);background:#ffffff0b;color:var(--muted);border-radius:10px;padding:9px;font-weight:700}.rank-tabs button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+  #setup-view{max-width:460px; margin:0 auto; padding:28px 20px 60px; display:none;}
+  .setup-header{text-align:center; margin-bottom:28px;}
+  .setup-header h1{font-size:25px;font-weight:900;margin:0 auto 10px;width:max-content;max-width:90%;padding:12px 24px;border:1px solid #ffffff45;border-radius:20px;background:linear-gradient(135deg,#dff8ff2b,#9687ff20,#ffffff12);backdrop-filter:blur(18px);box-shadow:inset 0 1px #fff8,0 14px 36px #08081799;position:relative;overflow:hidden;text-shadow:0 2px 12px #8edcff88}
+  .setup-header p{color:var(--muted); font-size:13.5px; margin:0;}
+  .mode-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px;}
+  .mode-card{background:linear-gradient(160deg,var(--card-hi),var(--card)); border:1.5px solid var(--line);
+    border-radius:18px; padding:18px 14px; cursor:pointer; text-align:left; transition:.15s;}
+  .mode-card:hover{border-color:var(--accent);}
+  .mode-card.selected{border-color:var(--accent); background:linear-gradient(160deg,#2a2244,#1e1a33);}
+  .mode-card .mode-icon{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+    font-size:20px; margin-bottom:12px; background:rgba(124,92,255,0.15);}
+  .mode-card.camera .mode-icon{background:rgba(255,77,141,.15)}
+  .mode-card.photo .mode-icon{background:rgba(255,194,77,.15)}
+  .mode-card.screen .mode-icon{background:rgba(77,210,255,.15)}
+  .mode-card.game .mode-icon{background:rgba(77,255,180,.15)}
+  .mode-card h4{margin:0 0 4px; font-size:14.5px; font-weight:700;}
+  .mode-card p{margin:0; font-size:11.5px; color:var(--muted); line-height:1.4;}
+  .name-input{width:100%; padding:14px 16px; border-radius:14px; border:1.5px solid var(--line);
+    background:rgba(255,255,255,0.04); color:var(--ink); font-size:14.5px; margin-bottom:16px; outline:none;}
+  .name-input:focus{border-color:var(--accent);}
+  #photo-upload-row{display:none;margin-bottom:16px;}
+  #photo-preview{width:100%;height:120px;border-radius:12px;object-fit:cover;margin-bottom:10px;display:none;}
+  .btn-file{display:flex;align-items:center;justify-content:center;width:100%;padding:11px;border-radius:12px;
+    background:rgba(255,255,255,0.05);border:1px dashed var(--muted);color:var(--muted);font-size:13px;font-weight:600;cursor:pointer;}
+  .btn-primary{width:100%; border:0; border-radius:16px; padding:16px 0; font-size:15px; font-weight:800;
+    color:#0B0B12; cursor:pointer; background:linear-gradient(120deg,var(--gold),#ffb020);
+    box-shadow:0 14px 30px -12px rgba(255,194,77,0.5);}
+  .btn-primary:disabled{opacity:.4; cursor:not-allowed; box-shadow:none;}
+  .btn-ghost{width:100%;border:0;border-radius:14px;padding:12px 0;font-size:13.5px;font-weight:700;color:var(--muted);background:transparent;cursor:pointer;margin-top:8px;}
+  .status-line{text-align:center; font-size:12.5px; color:var(--muted); margin-top:14px; min-height:16px;}
+
+  #room-view{display:none; position:fixed; inset:0; background:#000; z-index:100;}
+  #room-view.open{display:flex; flex-direction:column;}
+  .room-top{display:flex; align-items:center; justify-content:space-between; padding:14px 16px;
+    background:linear-gradient(180deg, rgba(0,0,0,.6), transparent); position:absolute; top:0; left:0; right:0; z-index:20;}
+  .room-title{display:flex; align-items:center; gap:8px; background:rgba(0,0,0,0.4); padding:6px 14px 6px 6px;
+    border-radius:24px; font-size:12.5px; font-weight:700;}
+  .room-title .dot{width:8px;height:8px;border-radius:50%; background:var(--accent-2); animation:pulse 1.5s infinite;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}
+  .top-actions{display:flex; gap:8px; align-items:center;}
+  .top-supporters{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:24;display:flex;align-items:flex-start;gap:5px;min-height:44px;cursor:pointer;pointer-events:auto}
+  .top-supporter{position:relative;width:42px;text-align:center;color:#fff;font-size:8px;font-weight:850;text-shadow:0 1px 3px #000}.top-supporter img{width:34px;height:34px;border-radius:50%;object-fit:cover;border:2px solid #c6c8d0;background:#222;display:block;margin:auto}.top-supporter.rank-1 img{border-color:#ffd34f;box-shadow:0 0 10px #ffc400}.top-supporter.rank-2 img{border-color:#dce8f4}.top-supporter.rank-3 img{border-color:#d98b55}.top-supporter .rank{position:absolute;top:-6px;left:50%;transform:translateX(-50%);font-size:11px}.top-supporter .points{display:block;max-width:42px;overflow:hidden;text-overflow:ellipsis}
+  .leader-podium{display:flex;align-items:flex-end;justify-content:center;gap:9px;padding:18px 4px 20px}.podium-user{width:92px;text-align:center}.podium-user.first{order:2}.podium-user.second{order:1}.podium-user.third{order:3}.podium-avatar{position:relative;width:66px;height:66px;margin:auto}.podium-user.first .podium-avatar{width:78px;height:78px}.podium-avatar img{width:100%;height:100%;border-radius:50%;object-fit:cover;border:3px solid #cbd5e1}.podium-user.first img{border-color:#ffd34f;box-shadow:0 0 18px #ffc83d}.podium-user.third img{border-color:#cb8655}.podium-rank{position:absolute;left:50%;bottom:-7px;transform:translateX(-50%);min-width:25px;padding:2px 6px;border-radius:10px;background:#252231;color:#fff;font-weight:950;font-size:11px}.podium-name{margin-top:11px;font-size:11px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.podium-points{font-size:11px;color:#ffd45f;font-weight:900}.leader-list{display:flex;flex-direction:column;gap:6px;max-height:42vh;overflow-y:auto}.leader-row{display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:13px;background:#ffffff0a}.leader-rank{width:24px;text-align:center;color:#aaa;font-weight:900}.leader-row img{width:38px;height:38px;border-radius:50%;object-fit:cover}.leader-name{flex:1;min-width:0;font-size:13px;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.leader-score{color:#ffd45f;font-size:12px;font-weight:900}
+  .btn-small{background:rgba(0,0,0,0.4); color:#fff; font-size:12px; font-weight:700; padding:7px 13px 7px 7px;
+    border-radius:20px; display:flex; align-items:center; gap:6px; cursor:pointer; border:0;}
+  .leave-btn{background:var(--accent-2); color:#fff; font-size:12.5px; font-weight:800; padding:9px 16px;
+    border-radius:22px; cursor:pointer; border:0;}
+
+  .video-stage{flex:1; min-width:0; min-height:0; position:relative; display:flex; align-items:stretch; justify-content:center; gap:0; overflow:hidden;}
+  .video-stage:not(.duel) .video-tile{flex:1 1 0; width:100%; min-width:0; border:0;}
+  .video-stage.duel{flex-direction:column;}
+  .video-stage.duel .video-tile:first-child{border-bottom:2px solid #ff3b66}
+  .video-stage.duel .video-tile:nth-child(2){border-top:2px solid #4aa8ff}
+  .video-tile{position:relative; flex:1 1 0; min-width:0; min-height:0; background:#0e0e16; overflow:hidden; display:flex; align-items:center; justify-content:center;}
+  .video-tile video{position:absolute; inset:0; width:100%; height:100%; object-fit:cover;}
+  .video-tile .placeholder{width:84px;height:84px;border-radius:50%;background:linear-gradient(160deg,#2a2244,#1a1628);
+    display:flex; align-items:center; justify-content:center; font-size:32px; color:var(--muted);}
+  .tile-name-tag{position:absolute; bottom:14px; left:14px; background:rgba(0,0,0,0.55); color:#fff; font-size:12px;
+    font-weight:700; padding:5px 12px; border-radius:14px; display:none; align-items:center; gap:6px; z-index:2;}
+  .vs-divider{position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); z-index:15;
+    width:44px;height:44px;border-radius:50%; background:linear-gradient(140deg,var(--accent),var(--accent-2));
+    display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:900; color:#fff;
+    box-shadow:0 6px 20px rgba(0,0,0,.5);}
+  .pk-hud{display:none;position:absolute;top:68px;left:12px;right:12px;z-index:30;color:#fff;text-align:center}
+  .pk-hud.open{display:block}.pk-clock{display:inline-block;background:#090912e8;padding:5px 12px;border-radius:16px;font-weight:900;box-shadow:0 3px 12px #0008}
+  .pk-scorebar{height:22px;margin-top:7px;border-radius:14px;overflow:hidden;display:flex;background:#333;border:2px solid #fff3}
+  .pk-score-a,.pk-score-b{min-width:12%;display:flex;align-items:center;font-weight:900;font-size:12px;padding:0 9px;transition:.25s}
+  .pk-score-a{justify-content:flex-start;background:linear-gradient(90deg,#ff2851,#ff5a89)}
+  .pk-score-b{justify-content:flex-end;background:linear-gradient(90deg,#36a8ff,#635bff)}
+  .pk-result{display:none;margin:12px auto 0;background:#090912dd;border:1px solid #fff3;border-radius:16px;padding:10px 16px;max-width:280px;font-weight:900}
+
+  .room-chat{position:absolute; left:0; bottom:76px; right:70px; max-height:22vh; overflow-y:auto;padding:6px 14px;
+    z-index:510; display:flex; flex-direction:column; gap:5px;mask-image:linear-gradient(to top, black 55%, transparent 100%); pointer-events:none;}
+  .room-chat .msg{font-size:12.5px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.7);display:flex;align-items:center;gap:7px;min-height:25px}
+  .room-chat .msg-avatar{width:24px;height:24px;border-radius:50%;object-fit:cover;flex:0 0 24px;background:#292536}
+  .room-chat .msg-body{min-width:0;overflow-wrap:anywhere}
+  .room-chat .msg.system .msg-body{color:#d8d3e4;font-weight:650}
+  .level-badge{--c1:#667085;--c2:#98a2b3;position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:20px;margin-right:5px;padding:0 7px 0 13px;clip-path:polygon(10% 0,90% 0,100% 50%,90% 100%,10% 100%,0 50%);color:#fff!important;font-size:10px;font-weight:950;font-style:italic;line-height:1;background:linear-gradient(135deg,var(--c1),var(--c2) 52%,var(--c1));border:0;text-shadow:0 1px 2px #000a;filter:drop-shadow(0 1px 3px #0008)}
+  .level-badge:before{content:'◆';position:absolute;left:4px;font-size:8px;color:#fff;filter:drop-shadow(0 0 3px #fff)}
+  .level-badge.tier-1{--c1:#52606d;--c2:#9fb3c8}.level-badge.tier-2{--c1:#087fbb;--c2:#45d6ff}.level-badge.tier-3{--c1:#3346c7;--c2:#9b7cff}.level-badge.tier-4{--c1:#7928a8;--c2:#ef64ff}.level-badge.tier-5{--c1:#9b3c13;--c2:#ffd05a;color:#fff8d3!important;filter:drop-shadow(0 0 5px #ffba3b)}.level-badge.tier-6{--c1:#6025d6;--c2:#ffe66a;color:#fff!important;animation:legendBadge 1.4s ease-in-out infinite alternate;filter:drop-shadow(0 0 7px #cf7cff)}
+  @keyframes legendBadge{to{filter:drop-shadow(0 0 10px #ffe66a);transform:scale(1.05)}}
+  #level-up-overlay{display:none;position:fixed;inset:0;z-index:590;pointer-events:none;align-items:center;justify-content:center;background:radial-gradient(circle,#7c5cff38,transparent 45%)}
+  #level-up-overlay.show{display:flex}.level-up-card{padding:20px 30px;border:1px solid #fff6;border-radius:24px;background:linear-gradient(135deg,#171326e8,#5a286ee8);text-align:center;box-shadow:0 0 45px #b96cff99;animation:levelPop 2.8s ease forwards}.level-up-icon{width:78px;height:48px;margin:0 auto 8px;font-size:22px}.level-up-title{font-size:14px;color:#ddd}.level-up-number{font-size:28px;font-weight:950;color:#ffe47c}@keyframes levelPop{0%{transform:scale(.3);opacity:0}18%,75%{transform:scale(1);opacity:1}100%{transform:scale(1.25);opacity:0}}
+  .room-chat .msg b{color:var(--gold);}
+
+  .room-bottom{position:absolute; bottom:0; left:0; right:0; padding:14px 16px; display:flex; align-items:center;
+    gap:10px; background:linear-gradient(0deg, rgba(0,0,0,.65), transparent); z-index:520;}
+  .chat-input{flex:1; padding:11px 16px; border-radius:22px; border:none; background:rgba(255,255,255,0.12);
+    color:#fff; font-size:13.5px; outline:none;}
+  .ctrl-btn{width:46px;height:46px;border-radius:50%; background:rgba(255,255,255,0.14); border:0; color:#fff;
+    font-size:18px; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0;}
+  .ctrl-btn.off{background:var(--accent-2);}
+  .ctrl-btn.gift-btn{background:linear-gradient(140deg,var(--gold),#ffb020); color:#1a0f24;}
+  .ctrl-btn.pk-invite{background:linear-gradient(140deg,var(--accent),var(--accent-2));}
+  /* Yayimci alətləri dar telefon ekraninda panelden kenara cixmasin. */
+  .room-bottom #guest-invite-btn,.room-bottom #pk-invite-btn{position:absolute;bottom:66px;width:48px;height:48px;z-index:525;box-shadow:0 5px 18px rgba(0,0,0,.45)}
+  .room-bottom #guest-invite-btn{right:70px;background:linear-gradient(140deg,#25c6da,#3478f6)}
+  .room-bottom #pk-invite-btn{right:14px}
+  .room-bottom #seat-request-btn{position:absolute;right:14px;bottom:66px;width:52px;height:52px;z-index:525;background:linear-gradient(140deg,#18c98b,#177be8);box-shadow:0 5px 18px #0008}
+
+  .modal-overlay{display:none; position:fixed; inset:0; background:rgba(5,5,10,0.85); z-index:250;
+    align-items:center; justify-content:center; padding:20px;}
+  .modal-overlay.open{display:flex;}
+  .setup-card{width:100%; max-width:380px; background:linear-gradient(180deg,var(--card-hi),var(--card));border-radius:22px; padding:26px 22px; text-align:center; max-height:88vh; overflow-y:auto;}
+  .setup-card h2{font-size:20px; font-weight:700; margin:0 0 6px;}
+  .setup-card p{color:var(--muted); font-size:13.5px; margin:0 0 22px;}
+  .part-sheet{background:linear-gradient(180deg,var(--card-hi),var(--card)); border-radius:22px 22px 0 0; padding:20px 20px calc(20px + env(safe-area-inset-bottom));}
+  .gift-sheet-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+  .gift-sheet-head h3{margin:0;flex:1;font-size:16px;font-weight:800}
+  .gift-close{width:32px;height:32px;border:0;border-radius:50%;background:rgba(255,255,255,.12);color:#fff;font-size:23px;line-height:30px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .gift-close:active{transform:scale(.94);background:rgba(255,255,255,.2)}
+  .gift-targets{display:flex;gap:9px;overflow-x:auto;padding:2px 1px 10px;margin-bottom:6px;scrollbar-width:none}
+  .gift-targets::-webkit-scrollbar{display:none}.gift-target{min-width:62px;border:1.5px solid transparent;border-radius:13px;padding:6px 5px;background:#ffffff0b;color:#ddd;text-align:center;cursor:pointer}
+  .gift-target.selected{border-color:#ff4d8d;background:#ff4d8d20;color:#fff}.gift-target img{width:34px;height:34px;border-radius:50%;object-fit:cover;display:block;margin:0 auto 3px}.gift-target span{display:block;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .field-shell{background:rgba(0,0,0,0.25); border:1px solid var(--line); border-radius:12px; padding:2px;}
+
+  .gift-fly-item{position:absolute;bottom:31vh;left:12px;display:flex;align-items:center;gap:8px;
+    background:rgba(20,10,30,0.55); backdrop-filter:blur(6px); padding:6px 14px 6px 6px; border-radius:30px;
+    animation:giftFlyUp 3s ease-out forwards;}
+  .gift-fly-item img.gicon{width:36px;height:36px;object-fit:contain;}
+  .gift-fly-item .gtext{color:#fff; font-size:12.5px; font-weight:700;}
+  .gift-fly-item .gcombo{color:var(--gold); font-weight:800; font-size:15px;}
+  .gcombo.combo-tier-1{color:#e8f7ff}.gcombo.combo-tier-2{color:#42d8ff;text-shadow:0 0 7px #15bfff}.gcombo.combo-tier-3{color:#c77dff;text-shadow:0 0 8px #9d39ff}.gcombo.combo-tier-4{color:#ffd85d;text-shadow:0 0 9px #ff9f1a;transform:scale(1.08)}.gcombo.combo-tier-5{background:linear-gradient(90deg,#42e8ff,#d37aff,#ffe86a,#ff648d);background-size:250% 100%;color:transparent;background-clip:text;-webkit-background-clip:text;animation:comboRainbow 1s linear infinite;font-size:18px}@keyframes comboRainbow{to{background-position:250% 0}}
+  @keyframes giftFlyUp{0%{transform:translateX(-260px) scale(0.7); opacity:0;}15%{transform:translateX(0) scale(1); opacity:1;}75%{opacity:1;}100%{transform:translateY(-32px); opacity:0;}}
+  #global-gift-ticker{position:fixed;top:58px;left:0;right:0;height:42px;overflow:hidden;pointer-events:none;z-index:560}
+  .global-gift-line{position:absolute;right:0;white-space:nowrap;display:flex;align-items:center;gap:8px;padding:7px 14px;border:1px solid #ffd86b88;border-radius:22px;background:linear-gradient(90deg,#341335e8,#7a331de8,#392042e8);color:#fff;font-size:13px;font-weight:850;box-shadow:0 6px 22px #0008;animation:globalGiftAcross 7s linear forwards}
+  .global-gift-line img{width:28px;height:28px;object-fit:contain}
+  .global-gift-line b{color:#ffe178}
+  @keyframes globalGiftAcross{from{transform:translateX(110%)}to{transform:translateX(calc(-100vw - 110%))}}
+  .fly-heart{position:absolute; font-size:28px; animation:heartFlyUp 2.2s ease-out forwards;}
+  @keyframes heartFlyUp{0%{transform:translateY(0) scale(0.6); opacity:1;}100%{transform:translateY(-260px) scale(1.3) rotate(15deg); opacity:0;}}
+  #gift-effect-player{display:none;position:fixed;inset:0 0 18vh;z-index:480;pointer-events:none;align-items:center;justify-content:center;overflow:hidden;transform:translateY(3vh)}
+  #gift-effect-player.playing{display:flex}#gift-effect-canvas{width:min(100vw,47.25vh);height:min(177.78vw,84vh);background:transparent}
+  #gift-effect-video{position:absolute;width:1px;height:1px;opacity:.001;left:-10px;top:-10px}
+
+  .modal-input{width:100%; padding:13px 14px; border-radius:12px; border:1.5px solid var(--line);
+    background:rgba(255,255,255,0.05); color:var(--ink); font-size:14px; margin-bottom:14px; outline:none; text-align:center;}
+  .modal-actions{display:flex; gap:10px;}
+  .modal-actions button{flex:1; border:0; border-radius:12px; padding:12px 0; font-size:13.5px; font-weight:700; cursor:pointer;}
+  .modal-actions .accept{background:linear-gradient(120deg,var(--gold),#ffb020); color:#0B0B12;}
+  .modal-actions .cancel{background:rgba(255,255,255,0.08); color:var(--ink);}
+
+  .pk-score-a,.pk-score-b{box-sizing:border-box;min-width:0;transition:flex-basis .35s ease}
+  .pk-names{display:flex;justify-content:space-between;gap:12px;font-weight:800;text-shadow:0 1px 4px #000;margin-bottom:8px}
+  .pk-names span{max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .video-stage.pk-active{flex-direction:row;align-items:stretch}
+  .video-stage.pk-active .video-tile{flex:1 1 0;width:50%;min-width:0;border:0}
+  .video-stage.pk-active .video-tile+ .video-tile{border-left:2px solid #58aaff}
+</style>
+</head>
+<body>
+
+<div class="toast" id="toast"></div>
+
+  <div id="browse-view">
+    <div class="browse-topbar">
+      <h1>CANLI YAYIMLAR</h1>
+    </div>
+    <div class="go-live-fab" id="open-setup-btn">🔴 Canlı yayım aç</div>
+    <div class="live-grid" id="live-grid"></div>
+    <div class="browse-empty" id="browse-empty" style="display:none;">Hazırda açıq canlı yayım yoxdur</div>
+  </div>
+
+  <div id="setup-view">
+    <div class="setup-header">
+      <div class="back-btn" id="setup-back-btn" style="position:absolute; left:20px; top:24px;">‹</div>
+      <h1 class="ice-title">CANLI YAYIM AÇ</h1>
+      <p>Yayım növünü seç; PK və qonaq funksiyası yaxında işləyəcək</p>
+    </div>
+
+    <div class="mode-grid">
+      <div class="mode-card camera selected" data-mode="camera">
+        <div class="mode-icon">📹</div>
+        <h4>Kamera</h4>
+        <p>Kamera və mikrofonla canlı yayım</p>
+      </div>
+      <div class="mode-card photo" data-mode="photo">
+        <div class="mode-icon">🖼️</div>
+        <h4>Şəkilli canlı</h4>
+        <p>Şəkil və mikrofonla yayıma çıx</p>
+      </div>
+    </div>
+
+    <input class="name-input" id="display-name" placeholder="Adın (görünəcək ad)">
+
+    <div id="photo-upload-row">
+      <img id="photo-preview">
+      <label class="btn-file">
+        📷 Canlıda göstəriləcək şəkli seç
+        <input type="file" id="photo-input" accept="image/*" style="display:none;">
+      </label>
+    </div>
+
+    <button class="btn-primary" id="go-live-btn">Yayımı Başlat</button>
+    <div class="status-line" id="setup-status"></div>
+  </div>
+
+  <div id="room-view">
+    <div class="room-top">
+      <div class="room-title"><span class="dot"></span><span id="room-title-text">CANLI</span></div>
+      <div class="top-actions">
+        <div class="btn-small" id="my-tokens-browse" style="display:none" aria-hidden="true"><span id="my-tokens-display">0</span></div>
+        <div class="btn-small">♥ <span id="like-count">0</span></div>
+        <button class="btn-small" id="broadcaster-rank-btn" title="Yayımçı sıralaması">🏆</button>
+        <button class="leave-btn" id="leave-btn">Bitir</button>
+      </div>
+    </div>
+    <div class="top-supporters" id="top-supporters"></div>
+
+    <div class="video-stage" id="video-stage">
+      <div class="video-tile" id="tile-waiting">
+        <div class="placeholder">👤</div>
+        <div class="tile-name-tag">Yayım gözlənilir…</div>
+      </div>
+    </div>
+    <div class="pk-hud" id="pk-hud"><div class="pk-names"><span id="pk-own-name"></span><b>PK</b><span id="pk-other-name"></span></div><div class="pk-clock" id="pk-clock">05:00</div><div class="pk-scorebar"><div class="pk-score-a" id="pk-score-a">🔴 0</div><div class="pk-score-b" id="pk-score-b">0 🔵</div></div><div class="pk-result" id="pk-result"></div><button type="button" id="pk-stop" style="display:none;margin-top:8px;border:0;border-radius:14px;padding:6px 12px;background:#171722;color:white">PK-ni bitir</button></div>
+
+    <div class="room-chat" id="room-chat-log"></div>
+
+    <div class="room-bottom">
+      <input class="chat-input" id="room-chat-input" placeholder="Mesaj yaz...">
+      <button class="ctrl-btn" id="chat-send-btn" style="width:40px;height:40px;font-size:16px;" aria-label="Mesaj göndər">➤</button>
+      <button class="ctrl-btn gift-btn" id="gift-open-btn">🎁</button>
+      <button class="ctrl-btn" id="mic-btn">🎤</button>
+      <button class="ctrl-btn" id="cam-btn" title="Kameranı aç/bağla" aria-label="Kameranı aç və ya bağla">📹</button>
+      <button class="ctrl-btn" id="seat-request-btn" style="display:none" title="Qonaq olmaq üçün istək göndər" aria-label="Qonaq olmaq üçün istək göndər">🙋</button>
+      <button class="ctrl-btn" id="guest-invite-btn" style="display:none;" title="İzləyicini qonaq qaldır" aria-label="İzləyicini qonaq qaldır">👥</button>
+      <button class="ctrl-btn pk-invite" id="pk-invite-btn" style="display:none;" title="Aktiv yayımçı ilə PK et" aria-label="Aktiv yayımçı ilə PK et">⚔️</button>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="gift-modal" onclick="if(event.target===this) closeGiftPicker()" style="align-items:flex-end;">
+    <div class="part-sheet" style="width:100%; max-width:460px;">
+      <div class="gift-sheet-head">
+        <h3>Hədiyyə göndər</h3>
+        <div class="btn-small" id="my-tokens-room" style="display:none" aria-hidden="true"><span id="my-tokens-display-2">0</span></div>
+        <button type="button" class="gift-close" onclick="closeGiftPicker()" aria-label="Hədiyyə panelini bağla">×</button>
+      </div>
+      <div class="gift-targets" id="gift-targets"></div>
+      <div id="gift-catalog-grid" style="display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; max-height:320px; overflow-y:auto; overflow-x:hidden; width:100%;"></div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="buy-tokens-modal" onclick="if(event.target===this) closeBuyTokens()">
+    <div class="setup-card">
+      <h2>Jeton al</h2>
+      <p>1 kristal = 10 jeton</p>
+      <div class="field-shell" style="margin-bottom:16px;"><input type="number" id="buy-tokens-input" min="1" placeholder="kristal sayı" style="width:100%; background:transparent; border:0; padding:12px; color:var(--ink); font-size:15px; outline:none; text-align:center;"></div>
+      <button class="btn-primary" onclick="doBuyTokens()">Al</button>
+      <button class="btn-ghost" onclick="closeBuyTokens()">Bağla</button>
+    </div>
+  </div>
+
+  <div id="gift-fly-container" style="position:fixed; inset:0; pointer-events:none; z-index:500; overflow:hidden;"></div>
+  <div id="global-gift-ticker"></div>
+  <div id="level-up-overlay"><div class="level-up-card"><div class="level-up-icon" id="level-up-icon">✦</div><div class="level-up-title" id="level-up-name"></div><div class="level-up-number" id="level-up-number"></div></div></div>
+  <div id="heart-fly-container" style="position:fixed; inset:0; pointer-events:none; z-index:400; overflow:hidden;"></div>
+  <div id="gift-effect-player"><canvas id="gift-effect-canvas" width="720" height="1280"></canvas><video id="gift-effect-video" playsinline preload="auto"></video></div>
+
+  <div class="modal-overlay" id="pk-picker-modal">
+    <div class="setup-card" style="text-align:left;">
+      <h2 style="text-align:center;">PK ucun reqib sec</h2>
+      <div id="pk-picker-list" style="display:flex; flex-direction:column; gap:10px; max-height:50vh; overflow-y:auto; margin-bottom:14px;"></div>
+      <button class="btn-ghost" id="pk-picker-close">Bagla</button>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="guest-picker-modal">
+    <div class="setup-card" style="text-align:left;">
+      <h2 style="text-align:center;">Qonaq qaldır</h2>
+      <div id="guest-picker-list" style="display:flex;flex-direction:column;gap:10px;max-height:50vh;overflow-y:auto;margin-bottom:14px;"></div>
+      <button class="btn-ghost" id="guest-picker-close">Bağla</button>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="guest-incoming-modal">
+    <div class="setup-card">
+      <h2>Canlı dəvəti gəldi</h2>
+      <p id="guest-incoming-text">Yayımçı səni qonaq dəvət edir</p>
+      <div class="modal-actions">
+        <button class="cancel" id="guest-incoming-decline">Rədd et</button>
+        <button class="accept" id="guest-incoming-accept">Qəbul et</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="seat-request-modal">
+    <div class="setup-card">
+      <img id="seat-request-photo" alt="" style="width:68px;height:68px;border-radius:50%;object-fit:cover;margin-bottom:10px">
+      <h2>Qonaq olmaq istəyir</h2>
+      <p id="seat-request-text"></p>
+      <div class="modal-actions"><button class="cancel" id="seat-request-decline">Rədd et</button><button class="accept" id="seat-request-accept">Qəbul et</button></div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="leaderboard-modal" style="align-items:flex-end">
+    <div class="part-sheet" style="width:100%;max-width:460px">
+      <div class="gift-sheet-head"><h3>🏆 Bu canlının liderləri</h3><button class="gift-close" id="leaderboard-close" aria-label="Liderliyi bağla">×</button></div>
+      <div class="leader-podium" id="leader-podium"></div>
+      <div class="leader-list" id="leader-list"></div>
+    </div>
+  </div>
+  <div class="modal-overlay" id="broadcaster-modal" style="align-items:flex-end">
+    <div class="part-sheet" style="width:100%;max-width:460px">
+      <div class="gift-sheet-head"><h3>🏆 Yayımçı sıralaması</h3><button class="gift-close" id="broadcaster-close">×</button></div>
+      <div class="rank-tabs"><button data-period="daily" class="active">Günlük</button><button data-period="weekly">Həftəlik</button><button data-period="monthly">Aylıq</button></div>
+      <div class="leader-podium" id="broadcaster-podium"></div><div class="leader-list" id="broadcaster-list"></div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="invite-modal">
+    <div class="setup-card">
+      <h2>PK Dəvəti Göndər</h2>
+      <p>Rəqib yayımçının otaq kodunu daxil et</p>
+      <input class="modal-input" id="target-room-input" placeholder="Otaq kodu (məs. abcd-1234)">
+      <div class="modal-actions">
+        <button class="cancel" id="invite-cancel">İmtina</button>
+        <button class="accept" id="invite-send">Göndər</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="incoming-modal">
+    <div class="setup-card">
+      <h2>PK Dəvəti Gəldi!</h2>
+      <p id="incoming-text">Bir yayımçı səni PK-a dəvət edir</p>
+      <div class="modal-actions">
+        <button class="cancel" id="incoming-decline">Rədd Et</button>
+        <button class="accept" id="incoming-accept">Qəbul Et</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const requestedRoomId = (new URLSearchParams(location.search).get('room') || '').trim();
+  let ws = null, myId = null, myUsername = '', currentStreamId = null;
+  let seats = {};
+  let localMedia = null, isHost = false, isSeat = false, pkSide = null, pkEndsAt = 0, pkTimer = null;
+  let rtcIceServers = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
+  const peers = new Map();
+  const remoteMedia = new Map();
+  let localPhotoUrl = '';
+  let photoStreamStop = null;
+
+  function showToast(t) { const e = document.getElementById('toast'); e.textContent = t; e.classList.add('show'); setTimeout(() => e.classList.remove('show'), 2400); }
+
+  document.addEventListener('click', event => {
+    const button = event.target.closest('#pk-invite-btn,#guest-invite-btn,#seat-request-btn,#invite-send,#incoming-accept,#guest-incoming-accept,#seat-request-accept');
+    if (!button) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    showToast('Yaxında işləyəcək');
+  }, true);
+
+  function connectWs() {
+    return new Promise((resolve, reject) => {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(proto + '//' + location.host + '/ws/');
+      ws.binaryType = 'arraybuffer';
+      ws.onopen = () => resolve();
+      ws.onerror = (e) => reject(e);
+      ws.onmessage = async (e) => {
+        try {
+          const buffer = new Uint8Array(e.data);
+          const len = buffer[0] * 256 + buffer[1];
+          const jsonStr = new TextDecoder('utf-8').decode(buffer.slice(2, 2 + len));
+          handleWsMessage(JSON.parse(jsonStr));
+        } catch (err) { console.error('WS decode xetasi:', err); }
+      };
+      ws.onclose = () => { showToast('Bağlantı kəsildi'); };
+    });
+  }
+  function wsSend(obj) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const utf8 = new TextEncoder().encode(JSON.stringify(obj));
+    const framed = new Uint8Array(2 + utf8.length);
+    framed[0] = Math.floor(utf8.length / 256); framed[1] = utf8.length % 256;
+    framed.set(utf8, 2);
+    ws.send(framed);
+  }
+  const pendingIce = new Map();
+  function resumeRemoteMedia() {
+    document.querySelectorAll('.video-tile video').forEach(video => {
+      if (video.closest('[id^="tile-remote-"]')) {
+        video.muted = false;
+        video.volume = 1;
+      }
+      video.play().catch(()=>{});
+    });
+  }
+  ['pointerdown','touchstart','click'].forEach(eventName => {
+    document.addEventListener(eventName, resumeRemoteMedia, { passive:true, capture:true });
+  });
+  async function setRemoteAndFlush(id, pc, description) {
+    await pc.setRemoteDescription(description);
+    const queued = pendingIce.get(String(id)) || [];
+    pendingIce.delete(String(id));
+    for (const candidate of queued) { try { await pc.addIceCandidate(candidate); } catch(e) {} }
+  }
+  // A receiving connection is not a seat: only confirmed publishers get tiles.
+  function attachStream(stream, remote, name) {
+    if (!stream || !stream.getTracks().some(track => track.readyState !== 'ended')) return;
+    if (remote != null) remoteMedia.set(String(remote), {stream,name});
+    else localMedia = stream;
+    syncVideoStage();
+  }
+  function syncVideoStage() {
+    const stage = document.getElementById('video-stage');
+    const publishing = isHost || isSeat;
+    const participants = Object.entries(seats).filter(([id]) => id !== pkOpponentId);
+    participants.sort((a,b) => Number(Boolean(b[1].isHost))-Number(Boolean(a[1].isHost)));
+    let tiles = [];
+    if (activePkId) {
+      // PK always has exactly two sides: this stream and its opponent.
+      if (publishing) {
+        tiles.push({id:'tile-local',remote:null,name:myUsername||'Sən',stream:localMedia,photoData:localPhotoUrl});
+      } else {
+        const ownId=String(window.currentHostId||'');
+        const ownSeat=seats[ownId];
+        const ownMedia=remoteMedia.get(ownId);
+        if (ownId) tiles.push({id:'tile-remote-'+ownId,remote:ownId,name:ownSeat?.name||'Yayımçı',stream:ownMedia?.stream,photoData:ownSeat?.photo_data||''});
+      }
+      if (pkOpponentId) {
+        const media = remoteMedia.get(pkOpponentId);
+        const seat = seats[pkOpponentId];
+        tiles.push({id:'tile-remote-'+pkOpponentId,remote:pkOpponentId,name:seat?.name||'Rəqib',stream:media?.stream,photoData:seat?.photo_data||''});
+      }
+    } else {
+      if (publishing) tiles.push({id:'tile-local',remote:null,name:myUsername||'Sən',stream:localMedia,photoData:localPhotoUrl});
+      for (const [id, seat] of participants) {
+        if (publishing && id === String(myId)) continue;
+        const media = remoteMedia.get(id);
+        tiles.push({id:'tile-remote-'+id,remote:id,name:seat.name||'Yayımçı',stream:media?.stream,photoData:seat.photo_data||''});
+      }
+    }
+    if (!tiles.length) tiles.push({id:'tile-waiting',name:'Yayım gözlənilir…'});
+    const desired = new Set(tiles.map(tile => tile.id));
+    stage.querySelectorAll('.video-tile').forEach(tile => {
+      if (!desired.has(tile.id)) {const video=tile.querySelector('video');if(video){video.pause();video.srcObject=null;}tile.remove();}
+    });
+    for (const item of tiles) {
+      let tile = document.getElementById(item.id);
+      if (!tile) {
+        tile=document.createElement('div');tile.id=item.id;tile.className='video-tile';
+        const placeholder=document.createElement('div');placeholder.className='placeholder';placeholder.textContent='👤';
+        const label=document.createElement('div');label.className='tile-name-tag';label.textContent=item.name;
+        tile.append(placeholder,label);stage.appendChild(tile);
+      }
+      if (item.stream && item.stream.getTracks().some(track => track.readyState !== 'ended')) mountMediaTile(item.stream,item.remote,item.name);
+      else if (item.photoData) mountPhotoTile(item.photoData,item.remote,item.name);
+      stage.appendChild(tile); // Stable order even when the opponent's media arrives first.
+    }
+    stage.classList.toggle('duel',tiles.length>1);
+    stage.classList.toggle('pk-active',Boolean(activePkId));
+  }
+  function mountPhotoTile(src, remote, name) {
+    const id = remote ? 'tile-remote-' + remote : 'tile-local';
+    let tile = document.getElementById(id);
+    if (!tile) { tile=document.createElement('div');tile.id=id;tile.className='video-tile';document.getElementById('video-stage').appendChild(tile); }
+    const old=tile.querySelector('img[data-live-photo]');
+    if(old && old.src===new URL(src,location.href).href)return;
+    tile.innerHTML='';
+    const img=document.createElement('img');img.dataset.livePhoto='1';img.src=src;img.alt=name||'Canlı şəkli';img.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover';
+    tile.appendChild(img);
+    const tag=document.createElement('div');tag.className='tile-name-tag';tag.textContent=name||'Yayımçı';tile.appendChild(tag);
+  }
+
+  function mountMediaTile(stream, remote, name) {
+    const id = remote ? 'tile-remote-' + remote : 'tile-local';
+    let tile = document.getElementById(id);
+    if (!tile) { tile = document.createElement('div'); tile.id = id; tile.className = 'video-tile'; document.getElementById('video-stage').appendChild(tile); }
+    const existing = tile.querySelector('video');
+    if (existing && existing.srcObject === stream) return;
+    tile.innerHTML = '';
+    const video = document.createElement('video');
+    video.autoplay = true; video.playsInline = true; video.setAttribute('playsinline','');
+    video.srcObject = stream; video.muted = !remote; video.volume = 1;
+    if (remote) {
+      video.muted = false;
+      const unlock = () => { video.muted=false; video.volume=1; video.play().catch(()=>{}); };
+      video.addEventListener('click', unlock);
+      video.addEventListener('canplay', unlock, { once:true });
+    }
+    video.onloadedmetadata = () => video.play().catch(() => {
+      if (remote) showToast('Səsi eşitmək üçün ekrana toxun');
+    });
+    tile.appendChild(video);
+    const tag = document.createElement('div'); tag.className = 'tile-name-tag'; tag.textContent = name || (remote ? 'Yayımçı' : 'Sən'); tile.appendChild(tag);
+  }
+  function peerFor(id) {
+    id = String(id); if (peers.has(id)) return peers.get(id);
+    const pc = new RTCPeerConnection({ iceServers: rtcIceServers, iceCandidatePoolSize: 4 });
+    if (localMedia) localMedia.getTracks().forEach(track => pc.addTrack(track, localMedia));
+    else { pc.addTransceiver('audio',{direction:'recvonly'}); pc.addTransceiver('video',{direction:'recvonly'}); }
+    pc.onicecandidate = e => { if (e.candidate) wsSend({ type:'webrtc_ice', stream_id:currentStreamId, target_id:id, candidate:e.candidate }); };
+    pc.ontrack = e => {
+      if (peers.get(id) !== pc) return;
+      const stream=e.streams && e.streams[0];
+      if (stream) attachStream(stream,id,seats[id]?.name||'Canlı');
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed') { try { pc.restartIce(); } catch(e) {} }
+      if (pc.connectionState === 'closed') peers.delete(id);
+    };
+    peers.set(id, pc); return pc;
+  }
+  async function offerTo(id) { const pc = peerFor(id); const offer = await pc.createOffer(); await pc.setLocalDescription(offer); wsSend({ type:'webrtc_offer', stream_id:currentStreamId, target_id:String(id), sdp:offer }); }
+  let activePkId=null, pkOpponentId=null, pkOffset=0;
+  function updatePkScore(a,b) {
+    a=Math.max(0,Number(a)||0); b=Math.max(0,Number(b)||0);
+    const left=pkSide==='B'?b:a, right=pkSide==='B'?a:b;
+    const ratio=left+right ? Math.max(12,Math.min(88,100*left/(left+right))) : 50;
+    const ae=document.getElementById('pk-score-a'),be=document.getElementById('pk-score-b');
+    ae.textContent=left.toLocaleString();be.textContent=right.toLocaleString();
+    ae.style.flex='0 0 '+ratio+'%';be.style.flex='1';
+  }
+  function startPkClock(endAt) {
+    pkEndsAt=Number(endAt)||0;clearInterval(pkTimer);
+    const tick=()=>{const s=Math.max(0,Math.ceil((pkEndsAt-Date.now()-pkOffset)/1000));document.getElementById('pk-clock').textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');};
+    tick();pkTimer=setInterval(tick,250);
+  }
+  function closePkPanel() {
+    clearInterval(pkTimer);
+    if(pkOpponentId){const p=peers.get(pkOpponentId);if(p)p.close();peers.delete(pkOpponentId);document.getElementById('tile-remote-'+pkOpponentId)?.remove();remoteMedia.delete(pkOpponentId);delete seats[pkOpponentId];}
+    document.querySelector('.vs-divider')?.remove();
+    document.getElementById('pk-hud').classList.remove('open');
+    document.getElementById('pk-result').style.display='none';
+    activePkId=null;pkSide=null;pkOpponentId=null;
+    syncVideoStage();
+  }
+  function showPkResult(msg){
+    document.getElementById('pk-stop').style.display='none';
+    clearInterval(pkTimer);updatePkScore(msg.score_a,msg.score_b);
+    const result=msg.winner==='draw'?'HEÇ-HEÇƏ':msg.winner===pkSide?'QƏLƏBƏ':'MƏĞLUBİYYƏT';
+    const el=document.getElementById('pk-result');el.textContent=result;el.style.display='block';
+    document.getElementById('pk-clock').textContent='NƏTİCƏ';
+  }
+  function openPkPanel(msg){
+    if(activePkId&&activePkId!==msg.pk_id)closePkPanel();
+    document.getElementById('pk-stop').style.display=isHost?'inline-block':'none';
+    activePkId=msg.pk_id;pkSide=msg.side;pkOpponentId=String(msg.opponent_host_id);
+    seats[pkOpponentId]={user_id:pkOpponentId,name:msg.opponent_host_name,photo:msg.opponent_host_photo,photo_data:msg.opponent_photo_url||'',isHost:true};
+    document.getElementById('pk-hud').classList.add('open');
+    document.getElementById('pk-result').style.display='none';
+    syncVideoStage();
+    document.getElementById('pk-own-name').textContent=isHost?myUsername:(seats[String(window.currentHostId)]?.name||'Yayımçı');
+    document.getElementById('pk-other-name').textContent=msg.opponent_host_name||'Rəqib';
+    syncVideoStage();
+    updatePkScore(msg.score_a,msg.score_b);
+    startPkClock(msg.phase==='countdown'?msg.starts_at:msg.ends_at);
+    if(msg.phase==='result')showPkResult(msg);
+    if(isHost&&pkSide==='A'&&!peers.has(pkOpponentId))offerTo(pkOpponentId).catch(console.error);
+  }
+  document.getElementById('pk-stop').addEventListener('click',()=>{if(isHost&&activePkId)wsSend({type:'end_pk',stream_id:currentStreamId});});
+  function handleWsMessage(msg) {
+    if (['live_feature_unavailable', 'live_invite', 'pk_invite', 'live_seat_request'].includes(msg.type)) { showToast('Yaxında işləyəcək'); return; }
+    if(msg.server_now)pkOffset=Number(msg.server_now)-Date.now();
+    if(['pk_phase','pk_score_update','pk_ended','pk_closed'].includes(msg.type)&&msg.pk_id!==activePkId)return;
+    switch (msg.type) {
+      case 'live_tokens_update':
+        document.getElementById('my-tokens-display').textContent = msg.live_tokens;
+        document.getElementById('my-tokens-display-2').textContent = msg.live_tokens;
+        break;
+      case 'live_started': currentStreamId=msg.stream_id;isHost=true;isSeat=true;document.getElementById('leave-btn').textContent='Bitir';seats={};seats[String(msg.host_id||myId)]={user_id:String(msg.host_id||myId),name:msg.host_name||myUsername,photo:msg.host_photo||'',photo_data:msg.photo_url||localPhotoUrl,isHost:true};selectedGiftTargetId=String(msg.host_id||myId);window.currentHostId=String(msg.host_id||myId);syncVideoStage();console.log('WS stream_id alindi:',currentStreamId);break;
+      case 'live_list': renderLiveGrid(msg.streams); if(document.getElementById('pk-picker-modal').classList.contains('open')) renderPkPicker(); break;
+      case 'live_viewers_list': renderGuestPicker(msg.viewers || []); break;
+      case 'live_seat_request': window.__pendingSeatRequest=msg;document.getElementById('seat-request-photo').src=msg.photo||('https://i.pravatar.cc/100?u='+encodeURIComponent(msg.user_id));document.getElementById('seat-request-text').textContent=(msg.name||'İzləyici')+' canlıya qonaq qalxmaq istəyir';document.getElementById('seat-request-modal').classList.add('open');break;
+      case 'live_seat_request_sent': showToast('Qonaq olmaq istəyin yayımçıya göndərildi');break;
+      case 'live_seat_request_declined': showToast('Yayımçı qonaq istəyini qəbul etmədi');break;
+      case 'live_joined':
+        document.getElementById('browse-view').style.display='none';
+        document.getElementById('setup-view').style.display='none';
+        document.getElementById('room-view').classList.add('open');
+        document.getElementById('mic-btn').style.display='none';
+        document.getElementById('cam-btn').style.display='none';
+        document.getElementById('seat-request-btn').style.display='flex';
+        document.getElementById('guest-invite-btn').style.display='none';
+        document.getElementById('pk-invite-btn').style.display='none';
+        document.getElementById('leave-btn').textContent='Çıx';
+        currentStreamId=msg.stream_id;isHost=false;isSeat=false;localPhotoUrl='';
+        closePkPanel();
+        seats={}; (msg.seats||[]).forEach((s,index)=>{seats[String(s.user_id)]={...s,photo_data:s.photo_data||((index===0)?msg.photo_url||'':''),isHost:index===0};});
+        if (msg.seats && msg.seats[0]) window.currentHostId = msg.seats[0].user_id;
+        if(msg.seats&&msg.seats[0])selectedGiftTargetId=String(msg.seats[0].user_id);
+        syncVideoStage();
+        updateGiftLeaderboard(msg.gift_leaderboard||[]);
+        document.getElementById('room-chat-log').innerHTML='';
+        (msg.chat_history||[]).forEach(item=>appendChatLine(item.name,item.text,item.photo,false,item.level,item.badge));
+        break;
+      case 'live_new_viewer': if(isHost) offerTo(msg.viewer_id).catch(console.error); break;
+      case 'live_invite': window.__pendingGuestInvite=msg; document.getElementById('guest-incoming-text').textContent=(msg.host_name||'Yayımçı')+' səni qonaq dəvət edir'; document.getElementById('guest-incoming-modal').classList.add('open'); break;
+      case 'live_invite_declined': showToast((msg.user_name||'İstifadəçi')+' dəvəti rədd etdi'); break;
+      case 'live_seat_joined_self': {
+        currentStreamId=msg.stream_id; isSeat=true;
+        seats={}; (msg.existing_seats||[]).forEach(s=>{seats[String(s.user_id)]=s;});
+        [...(msg.existing_seats||[]).map(s=>s.user_id), ...(msg.existing_viewer_ids||[])].forEach(id=>offerTo(id).catch(console.error));
+        syncVideoStage();
+        document.getElementById('mic-btn').style.display='flex';document.getElementById('cam-btn').style.display='flex';document.getElementById('seat-request-btn').style.display='none';document.getElementById('leave-btn').textContent='Çıx';showToast('Canlıya qonaq qoşuldun'); break;
+      }
+      case 'live_new_seat': {
+        const newSeatId=String(msg.user_id);
+        seats[newSeatId]={...msg,isHost:false};
+        syncVideoStage();
+        if (localMedia && newSeatId !== String(myId)) offerTo(newSeatId).catch(console.error);
+        if(document.getElementById('gift-modal').classList.contains('open'))renderGiftTargets();
+        break;
+      }
+      case 'live_camera_state': {const tile=document.getElementById('tile-remote-'+msg.user_id);if(tile)tile.style.opacity=msg.off?'.28':'1';break;}
+      case 'live_seat_left': { const id=String(msg.user_id),pc=peers.get(id); if(pc)pc.close(); peers.delete(id); const tile=document.getElementById('tile-remote-'+id); if(tile)tile.remove(); remoteMedia.delete(id);delete seats[id];syncVideoStage(); break; }
+      case 'webrtc_offer': { const pc=peerFor(msg.from_id); setRemoteAndFlush(msg.from_id,pc,msg.sdp).then(()=>pc.createAnswer()).then(a=>pc.setLocalDescription(a).then(()=>a)).then(a=>wsSend({type:'webrtc_answer',stream_id:currentStreamId,target_id:msg.from_id,sdp:a})).catch(console.error); break; }
+      case 'webrtc_answer': { const pc=peerFor(msg.from_id); setRemoteAndFlush(msg.from_id,pc,msg.sdp).catch(console.error); break; }
+      case 'webrtc_ice': { const pc=peerFor(msg.from_id); if(pc.remoteDescription) pc.addIceCandidate(msg.candidate).catch(console.error); else { const id=String(msg.from_id),q=pendingIce.get(id)||[]; q.push(msg.candidate); pendingIce.set(id,q); } break; }
+      case 'live_gift_received': onGiftReceived(msg); break;
+      case 'live_global_gift': showGlobalGift(msg); break;
+      case 'live_gift_leaderboard': updateGiftLeaderboard(msg.supporters||[]); break;
+      case 'broadcaster_leaderboard': broadcasterRanks[msg.period]=msg.list||[]; if(msg.period===broadcasterPeriod) renderBroadcasterLeaderboard(); break;
+      case 'live_likes': document.getElementById('like-count').textContent = msg.likes; break;
+      case 'live_chat': appendChatLine(msg.name,msg.text,msg.photo,false,msg.level,msg.badge); break;
+      case 'live_user_joined': appendChatLine(msg.name,'yayıma qatıldı',msg.photo,true); break;
+      case 'live_level_up': queueLevelUps(msg); break;
+      case 'pk_invite': window.__pendingPkInvite=msg; document.getElementById('incoming-text').textContent=(msg.host_name||'Yayımçı')+' səni PK-a dəvət edir'; document.getElementById('incoming-modal').classList.add('open'); break;
+      case 'pk_invite_sent': showToast('PK dəvəti göndərildi'); break;
+      case 'pk_declined': case 'pk_invite_expired': if(window.__pendingPkInvite?.invite_id===msg.invite_id){window.__pendingPkInvite=null;document.getElementById('incoming-modal').classList.remove('open');} showToast(msg.type==='pk_declined'?'PK dəvəti rədd edildi':'PK dəvətinin vaxtı bitdi'); break;
+      case 'pk_started': openPkPanel(msg); break;
+      case 'pk_phase': if(msg.phase==='battle')startPkClock(msg.ends_at); break;
+      case 'pk_score_update': updatePkScore(msg.score_a,msg.score_b); break;
+      case 'pk_ended': showPkResult(msg); break;
+      case 'pk_closed': closePkPanel(); break;
+      case 'live_error': showToast(({pk_busy:'Yayımçı artıq PK-dədir',pk_invite_pending:'Cavab gözləyən PK dəvəti var',pk_invite_expired:'Dəvətin vaxtı bitib',not_found:'Bu otaqda hələ canlı yoxdur',room_busy:'Bu otaqda artıq canlı yayım var'})[msg.reason]||'Əməliyyat alınmadı: '+msg.reason); break;
+      case 'live_ended': showToast('Canlı yayım bitdi'); setTimeout(()=>location.reload(),1200); break;
+      default: break;
+    }
+  }
+
+  function appendChatLine(name,text,photo,system,level,badge) {
+    const log = document.getElementById('room-chat-log');
+    const div = document.createElement('div');
+    div.className = 'msg' + (system ? ' system' : '');
+    const img=document.createElement('img'); img.className='msg-avatar';
+    img.src=photo||('https://i.pravatar.cc/64?u='+encodeURIComponent(name||'guest')); img.alt='';
+    const body=document.createElement('div'); body.className='msg-body';
+    if(system){body.textContent=(name||'İstifadəçi')+' '+text;}
+    else {if(level)body.appendChild(createLevelBadge(level));const strong=document.createElement('b');strong.textContent=name||'Qonaq';body.appendChild(strong);body.appendChild(document.createTextNode(': '+text));}
+    div.appendChild(img); div.appendChild(body);
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+    while (log.children.length > 30) log.removeChild(log.firstChild);
+  }
+  const levelUpQueue=[];let levelUpRunning=false;
+  function levelTier(level){level=Math.max(1,Math.min(50,Number(level)||1));return level===50?6:Math.min(5,Math.floor((level-1)/10)+1);}
+  function createLevelBadge(level){const lv=document.createElement('span');lv.className='level-badge tier-'+levelTier(level);lv.textContent=String(Math.max(1,Math.min(50,Number(level)||1)));return lv;}
+  function queueLevelUps(msg){for(let level=Math.max(2,Number(msg.from_level||msg.level-1)+1);level<=Math.min(50,Number(msg.level));level++)levelUpQueue.push({...msg,level});playNextLevelUp();}
+  function playNextLevelUp(){if(levelUpRunning||!levelUpQueue.length)return;levelUpRunning=true;const msg=levelUpQueue.shift(),overlay=document.getElementById('level-up-overlay'),icon=document.getElementById('level-up-icon');icon.innerHTML='';icon.appendChild(createLevelBadge(msg.level));document.getElementById('level-up-name').textContent=(msg.name||'İstifadəçi')+' yeni səviyyəyə keçdi';document.getElementById('level-up-number').textContent='LEVEL '+msg.level;overlay.classList.remove('show');void overlay.offsetWidth;overlay.classList.add('show');setTimeout(()=>{overlay.classList.remove('show');levelUpRunning=false;setTimeout(playNextLevelUp,120);},2900);}
+  function sendRoomChat() {
+    const i = document.getElementById('room-chat-input');
+    const t = i.value.trim();
+    if (!t || !currentStreamId) return;
+    wsSend({ type: 'live_chat', stream_id: currentStreamId, text: t });
+    i.value = '';
+  }
+
+  let giftCatalogCache = null, selectedGiftTargetId = null;
+  let broadcasterPeriod='daily', broadcasterRanks={daily:[],weekly:[],monthly:[]};
+  function renderGiftTargets(){
+    const row=document.getElementById('gift-targets'),people=Object.values(seats);
+    if(!people.length){row.innerHTML='';return;}
+    if(!selectedGiftTargetId||!seats[String(selectedGiftTargetId)])selectedGiftTargetId=String((people.find(p=>p.isHost)||people[0]).user_id);
+    row.innerHTML='';people.forEach(person=>{const id=String(person.user_id),button=document.createElement('button');button.type='button';button.className='gift-target'+(id===String(selectedGiftTargetId)?' selected':'');
+      const img=document.createElement('img');img.src=person.photo||('https://i.pravatar.cc/80?u='+encodeURIComponent(id));img.alt='';const label=document.createElement('span');label.textContent=person.isHost?'Yayımçı':(person.name||'Qonaq');button.append(img,label);button.onclick=()=>{selectedGiftTargetId=id;renderGiftTargets();};row.appendChild(button);});
+  }
+  async function openGiftPicker() {
+    document.getElementById('gift-modal').classList.add('open');
+    renderGiftTargets();
+    const token = localStorage.getItem('authToken');
+    try {
+      const tokRes = await fetch('/api/my-tokens', { headers: { 'Authorization': 'Bearer ' + token } });
+      const tok = await tokRes.json();
+      document.getElementById('my-tokens-display').textContent = tok.live_tokens || 0;
+      document.getElementById('my-tokens-display-2').textContent = tok.live_tokens || 0;
+    } catch (e) {}
+    if (!giftCatalogCache) {
+      try {
+        const res = await fetch('/api/live-gifts-catalog', { headers: { 'Authorization': 'Bearer ' + token } });
+        giftCatalogCache = await res.json();
+      } catch (e) { giftCatalogCache = []; }
+    }
+    const grid = document.getElementById('gift-catalog-grid');
+    grid.innerHTML = giftCatalogCache.map(g => `
+      <div style="text-align:center; cursor:pointer; padding:8px 4px; border-radius:12px; background:rgba(255,255,255,0.03);" onclick="sendGift('${g.id}','${g.image}',${g.price})">
+        <img src="${g.image}" style="width:44px;height:44px;object-fit:contain;" loading="lazy">
+        <div style="font-size:9px; color:#eee; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${g.name}</div>
+        <div style="font-size:10.5px; color:var(--gold); font-weight:800; margin-top:2px;">💎${g.price}</div>
+      </div>
+    `).join('');
+  }
+  function closeGiftPicker() { document.getElementById('gift-modal').classList.remove('open'); }
+  document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape') closeGiftPicker();
+  });
+  function sendGift(giftId, giftImage, price) {
+    const hostId=Object.keys(seats).find(uid=>seats[uid].isHost)||String(myId),targetId=selectedGiftTargetId||hostId;
+    wsSend({type:'live_send_gift',stream_id:currentStreamId,gift_id:giftId,gift_image:giftImage,gift_price:price,target_user_id:targetId});
+  }
+  function showGlobalGift(msg) {
+    const host=document.getElementById('global-gift-ticker');
+    const line=document.createElement('div'); line.className='global-gift-line';
+    if(msg.gift_image){const img=document.createElement('img');img.src=msg.gift_image;img.alt='';line.appendChild(img);}
+    const text=document.createElement('span');
+    if(msg.sender_level)text.appendChild(createLevelBadge(msg.sender_level));
+    const sender=document.createElement('b');sender.textContent=msg.sender_name||'İstifadəçi';
+    const target=document.createElement('b');target.textContent=msg.target_name||'yayımçı';
+    text.appendChild(sender);text.appendChild(document.createTextNode(' '));text.appendChild(target);
+    text.appendChild(document.createTextNode(' üçün '+(msg.gift_name||'hədiyyə')+' göndərdi'));
+    line.appendChild(text);host.appendChild(line);setTimeout(()=>line.remove(),7200);
+  }
+  let liveGiftLeaderboard=[];
+  function updateGiftLeaderboard(list){liveGiftLeaderboard=list||[];renderTopSupporters(liveGiftLeaderboard);if(document.getElementById('leaderboard-modal').classList.contains('open'))renderGiftLeaderboard();}
+  function renderTopSupporters(list){const host=document.getElementById('top-supporters');host.innerHTML='';(list||[]).slice(0,3).forEach((person,index)=>{const item=document.createElement('div');item.className='top-supporter rank-'+(index+1);item.title=(person.name||'İstifadəçi')+' · '+Number(person.points||0).toLocaleString();const rank=document.createElement('span');rank.className='rank';rank.textContent=index===0?'👑':String(index+1);const img=document.createElement('img');img.src=person.photo||('https://i.pravatar.cc/80?u='+encodeURIComponent(person.user_id));img.alt=person.name||'';const points=document.createElement('span');points.className='points';points.textContent=compactGiftPoints(person.points);item.append(rank,img,points);host.appendChild(item);});}
+  function renderGiftLeaderboard(){const podium=document.getElementById('leader-podium'),rows=document.getElementById('leader-list'),list=liveGiftLeaderboard;podium.innerHTML='';rows.innerHTML='';list.slice(0,3).forEach((person,index)=>{const box=document.createElement('div');box.className='podium-user '+['first','second','third'][index];const av=document.createElement('div');av.className='podium-avatar';const img=document.createElement('img');img.src=person.photo||('https://i.pravatar.cc/100?u='+encodeURIComponent(person.user_id));const rank=document.createElement('span');rank.className='podium-rank';rank.textContent=index===0?'👑 1':String(index+1);av.append(img,rank);const name=document.createElement('div');name.className='podium-name';name.textContent=person.name;const score=document.createElement('div');score.className='podium-points';score.textContent='💎 '+Number(person.points||0).toLocaleString();box.append(av,name,score);podium.appendChild(box);});list.slice(3).forEach((person,index)=>{const row=document.createElement('div');row.className='leader-row';const rank=document.createElement('div');rank.className='leader-rank';rank.textContent=String(index+4);const img=document.createElement('img');img.src=person.photo||('https://i.pravatar.cc/80?u='+encodeURIComponent(person.user_id));const name=document.createElement('div');name.className='leader-name';if(person.level)name.appendChild(createLevelBadge(person.level));name.appendChild(document.createTextNode(person.name||'İstifadəçi'));const score=document.createElement('div');score.className='leader-score';score.textContent='💎 '+Number(person.points||0).toLocaleString();row.append(rank,img,name,score);rows.appendChild(row);});if(!list.length)rows.innerHTML='<div style="text-align:center;color:var(--muted);padding:30px">Hələ hədiyyə göndərilməyib</div>';}
+  function compactGiftPoints(value){const n=Number(value)||0;if(n>=1000000)return(n/1000000).toFixed(n>=10000000?0:1)+'M';if(n>=1000)return(n/1000).toFixed(n>=10000?0:1)+'K';return String(n);}
+  function openBuyTokens() { document.getElementById('buy-tokens-modal').classList.add('open'); }
+  function closeBuyTokens() { document.getElementById('buy-tokens-modal').classList.remove('open'); }
+  function renderBroadcasterLeaderboard(){const list=broadcasterRanks[broadcasterPeriod]||[],p=document.getElementById('broadcaster-podium'),r=document.getElementById('broadcaster-list');p.innerHTML='';r.innerHTML='';list.slice(0,3).forEach((x,i)=>{const b=document.createElement('div');b.className='podium-user '+['first','second','third'][i];const av=document.createElement('div');av.className='podium-avatar';const im=document.createElement('img');im.src=x.photo||('https://i.pravatar.cc/100?u='+x.user_id);const rk=document.createElement('span');rk.className='podium-rank';rk.textContent=i===0?'👑 1':String(i+1);av.append(im,rk);const n=document.createElement('div');n.className='podium-name';n.textContent=x.name||'Yayımçı';const s=document.createElement('div');s.className='podium-points';s.textContent='💎 '+Number(x.points||0).toLocaleString();b.append(av,n,s);p.appendChild(b)});list.slice(3).forEach((x,i)=>{const row=document.createElement('div');row.className='leader-row';const rk=document.createElement('div');rk.className='leader-rank';rk.textContent=String(i+4);const im=document.createElement('img');im.src=x.photo||('https://i.pravatar.cc/80?u='+x.user_id);const n=document.createElement('div');n.className='leader-name';n.textContent=x.name||'Yayımçı';const s=document.createElement('div');s.className='leader-score';s.textContent='💎 '+Number(x.points||0).toLocaleString();row.append(rk,im,n,s);r.appendChild(row)});if(!list.length)r.innerHTML='<div style="text-align:center;color:var(--muted);padding:30px">Bu dövrdə hələ nəticə yoxdur</div>';}
+  let __giftAudioCtx = null;
+  function __getAudioCtx() { if (!__giftAudioCtx) __giftAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); return __giftAudioCtx; }
+  function playGiftChime() {
+    const c = __getAudioCtx(); const now = c.currentTime;
+    [988, 1318].forEach((f, i) => {
+      const o = c.createOscillator(); const g = c.createGain();
+      o.type = 'sine'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, now + i * 0.05);
+      g.gain.exponentialRampToValueAtTime(0.22, now + i * 0.05 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.05 + 0.35);
+      o.connect(g); g.connect(c.destination);
+      o.start(now + i * 0.05); o.stop(now + i * 0.05 + 0.35);
+    });
+  }
+  const __giftComboMap = {};
+  const __giftEffectQueue = [];
+  let __giftEffectPlaying = false;
+  function __compileGiftShader(gl,type,source){const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));return s;}
+  function __createGiftRenderer(canvas,video){
+    const gl=canvas.getContext('webgl',{alpha:true,premultipliedAlpha:false}); if(!gl)return null;
+    const vs=__compileGiftShader(gl,gl.VERTEX_SHADER,'attribute vec2 p;varying vec2 uv;void main(){uv=vec2((p.x+1.0)*.5,1.0-(p.y+1.0)*.5);gl_Position=vec4(p,0,1);}');
+    const fs=__compileGiftShader(gl,gl.FRAGMENT_SHADER,'precision mediump float;varying vec2 uv;uniform sampler2D tex;void main(){vec4 rgb=texture2D(tex,vec2(uv.x*.5,uv.y));float a=texture2D(tex,vec2(.5+uv.x*.5,uv.y)).r;gl_FragColor=vec4(rgb.rgb,a);}');
+    const program=gl.createProgram();gl.attachShader(program,vs);gl.attachShader(program,fs);gl.linkProgram(program);gl.useProgram(program);
+    const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
+    const pos=gl.getAttribLocation(program,'p');gl.enableVertexAttribArray(pos);gl.vertexAttribPointer(pos,2,gl.FLOAT,false,0,0);
+    const texture=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,texture);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+    let raf=0; const draw=()=>{if(video.paused||video.ended)return;gl.viewport(0,0,canvas.width,canvas.height);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);gl.bindTexture(gl.TEXTURE_2D,texture);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,video);gl.drawArrays(gl.TRIANGLES,0,6);raf=requestAnimationFrame(draw);};
+    return {start(){cancelAnimationFrame(raf);draw();},stop(){cancelAnimationFrame(raf);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);}};
+  }
+  let __giftRenderer=null;
+  async function fetchProtectedGiftEffect(effectId){
+    const authToken=localStorage.getItem('authToken'); if(!authToken)throw new Error('Giriş tələb olunur');
+    const headers={'Authorization':'Bearer '+authToken};
+    const ticketRes=await fetch('/api/live-gift-media-ticket/'+encodeURIComponent(effectId),{method:'POST',headers});
+    if(!ticketRes.ok)throw new Error('Animasiya icazəsi alınmadı');
+    const ticket=await ticketRes.json();
+    const mediaRes=await fetch('/api/live-gift-media/'+encodeURIComponent(effectId)+'?ticket='+encodeURIComponent(ticket.ticket),{headers,cache:'no-store'});
+    if(!mediaRes.ok)throw new Error('Animasiya yüklənmədi');
+    return URL.createObjectURL(await mediaRes.blob());
+  }
+  async function playNextGiftEffect(){
+    if(__giftEffectPlaying||!__giftEffectQueue.length)return; __giftEffectPlaying=true;
+    const effectId=__giftEffectQueue.shift(),wrap=document.getElementById('gift-effect-player'),video=document.getElementById('gift-effect-video'),canvas=document.getElementById('gift-effect-canvas');
+    let url='';try{url=await fetchProtectedGiftEffect(effectId);}catch(e){console.warn(e.message);__giftEffectPlaying=false;return playNextGiftEffect();}
+    if(!__giftRenderer)__giftRenderer=__createGiftRenderer(canvas,video);
+    const done=()=>{video.onended=video.onerror=null;video.pause();video.removeAttribute('src');video.load();URL.revokeObjectURL(url);if(__giftRenderer)__giftRenderer.stop();wrap.classList.remove('playing');__giftEffectPlaying=false;setTimeout(playNextGiftEffect,80);};
+    video.onended=done;video.onerror=done;video.src=url;wrap.classList.add('playing');video.play().then(()=>{if(__giftRenderer)__giftRenderer.start();}).catch(()=>{video.muted=true;video.play().then(()=>{if(__giftRenderer)__giftRenderer.start();}).catch(done);});
+  }
+  // Her qebul olunan hediyye ucun bir animasiya: combo zamani novbeden effekt silinmir.
+  function enqueueGiftEffect(effectId){if(!effectId)return;__giftEffectQueue.push(effectId);playNextGiftEffect();}
+  function onGiftReceived(msg) {
+    const key = msg.sender_id + '_' + msg.gift_id;
+    __giftComboMap[key] = (__giftComboMap[key] || 0) + 1;
+    const combo = __giftComboMap[key];
+    window.__comboResetTimers = window.__comboResetTimers || {};
+    clearTimeout(window.__comboResetTimers[key]);
+    window.__comboResetTimers[key] = setTimeout(function() { delete __giftComboMap[key]; }, 2500);
+    if(msg.has_animation&&msg.effect_id) enqueueGiftEffect(msg.effect_id); else playGiftChime();
+    const container = document.getElementById('gift-fly-container');
+    const el = document.createElement('div');
+    el.className = 'gift-fly-item';
+    const img = document.createElement('img');
+    img.className = 'gicon';
+    img.src = msg.gift_image;
+    const nameDiv = document.createElement('div');
+    nameDiv.className = 'gtext';
+    if(msg.sender_level)nameDiv.appendChild(createLevelBadge(msg.sender_level));nameDiv.appendChild(document.createTextNode(msg.sender_name));
+    const descDiv = document.createElement('div');
+    descDiv.className = 'gtext';
+    descDiv.style.opacity = '0.85';
+    descDiv.style.fontWeight = '500';
+    descDiv.textContent = 'hədiyyə göndərdi';
+    const textWrap = document.createElement('div');
+    textWrap.appendChild(nameDiv);
+    textWrap.appendChild(descDiv);
+    const comboDiv = document.createElement('div');
+    comboDiv.className = 'gcombo';
+    comboDiv.textContent = 'x' + combo;
+    comboDiv.classList.add('combo-tier-'+(combo>=50?5:combo>=20?4:combo>=10?3:combo>=5?2:1));
+    el.appendChild(img);
+    el.appendChild(textWrap);
+    el.appendChild(comboDiv);
+    const visible = container.querySelectorAll('.gift-fly-item').length;
+    el.style.bottom = (31 + Math.min(visible,2) * 7) + 'vh';
+    container.appendChild(el);
+    setTimeout(function() { el.remove(); }, 3000);
+  }
+  async function doBuyTokens() {
+    const amount = Number(document.getElementById('buy-tokens-input').value);
+    const token = localStorage.getItem('authToken');
+    try {
+      const res = await fetch('/api/buy-tokens', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ crystal_amount: amount }) });
+      const data = await res.json();
+      if (!res.ok) { showToast(data.error === 'insufficient_crystals' ? 'Kifayət qədər kristal yoxdur' : 'Xəta'); return; }
+      document.getElementById('my-tokens-display').textContent = data.live_tokens;
+      document.getElementById('my-tokens-display-2').textContent = data.live_tokens;
+      showToast('Jeton alındı!');
+      closeBuyTokens();
+    } catch (e) { showToast('Bağlantı xətası'); }
+  }
+  document.getElementById('gift-open-btn').addEventListener('click', openGiftPicker);
+
+  (async function autoFillName() {
+    try {
+      const token = localStorage.getItem('authToken');
+      const res = await fetch('/api/profile/me', { headers: { 'Authorization': 'Bearer ' + token } });
+      const data = await res.json();
+      const realName = (data.display_name || data.username) || '';
+      myId = data.id;
+      if (realName) {
+        const input = document.getElementById('display-name');
+        input.value = realName;
+        input.disabled = true;
+      }
+    } catch (e) { console.warn('Profil adi avtomatik alinmadi:', e.message); }
+  })();
+  document.getElementById('invite-cancel').addEventListener('click', () => document.getElementById('invite-modal').classList.remove('open'));
+
+  let selectedMode = 'camera';
+  let uploadedPhotoDataUrl = null;
+
+  document.querySelectorAll('.mode-card').forEach(card => {
+    card.addEventListener('click', () => {
+      document.querySelectorAll('.mode-card').forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+      selectedMode = card.dataset.mode;
+      document.getElementById('photo-upload-row').style.display = selectedMode === 'photo' ? 'block' : 'none';
+      document.getElementById('go-live-btn').disabled = false;
+    });
+  });
+
+  document.getElementById('photo-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      uploadedPhotoDataUrl = ev.target.result;
+      const preview = document.getElementById('photo-preview');
+      preview.src = uploadedPhotoDataUrl;
+      preview.style.display = 'block';
+    };
+    reader.readAsDataURL(file);
+  });
+
+  async function uploadLivePhoto() {
+    if (!uploadedPhotoDataUrl) return '';
+    const token=localStorage.getItem('authToken');
+    const res=await fetch('/api/live-photo-upload',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({photo_data:uploadedPhotoDataUrl})});
+    if(!res.ok)throw new Error('Şəkil serverə yüklənmədi');
+    const data=await res.json();return data.photo_url||'';
+  }
+
+  async function createPhotoVideoStream(imageDataUrl) {
+    const img = new Image();
+    await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = imageDataUrl; });
+    const canvas = document.createElement('canvas');
+    canvas.width = 640; canvas.height = 640;
+    const ctx = canvas.getContext('2d');
+    const scale = Math.max(canvas.width / img.width, canvas.height / img.height);
+    const w = img.width * scale, h = img.height * scale;
+    const draw=()=>{ctx.fillStyle='#080812';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(img,(canvas.width-w)/2,(canvas.height-h)/2,w,h);};
+    draw();
+    const stream=canvas.captureStream ? canvas.captureStream(15) : null;
+    if(!stream)throw new Error('Bu brauzer şəkil canlısını dəstəkləmir');
+    let stopped=false;const loop=()=>{if(stopped)return;draw();requestAnimationFrame(loop);};requestAnimationFrame(loop);
+    photoStreamStop=()=>{stopped=true;stream.getTracks().forEach(track=>track.stop());};
+    return stream;
+  }
+
+  async function addMicrophoneToStream(stream) {
+    try {
+      const mic=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
+      mic.getAudioTracks().forEach(track=>stream.addTrack(track));
+    } catch(e) { showToast('Mikrofon icazəsi verilmədi'); }
+    return stream;
+  }
+
+  async function createSelectedLiveStream(mode) {
+    if(mode==='photo') {
+      if(!uploadedPhotoDataUrl) throw new Error('Əvvəl canlı üçün şəkil seç');
+      return addMicrophoneToStream(await createPhotoVideoStream(uploadedPhotoDataUrl));
+    }
+    if(mode==='screen'||mode==='game') {
+      if(!navigator.mediaDevices.getDisplayMedia) {
+        showToast('Telefon brauzeri ekran paylaşımını açmır; kamera rejimi istifadə olunur');
+        return navigator.mediaDevices.getUserMedia({audio:true,video:{facingMode:'user',width:{ideal:1280},height:{ideal:720}}});
+      }
+      const display=await navigator.mediaDevices.getDisplayMedia({
+        video:mode==='game'?{frameRate:{ideal:60,max:60}}:{frameRate:{ideal:30,max:30}},audio:true
+      });
+      await addMicrophoneToStream(display);
+      const screenTrack=display.getVideoTracks()[0];
+      if(screenTrack)screenTrack.onended=()=>showToast('Ekran paylaşımı dayandırıldı');
+      return display;
+    }
+    return navigator.mediaDevices.getUserMedia({
+      audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},
+      video:{facingMode:'user',width:{ideal:1280},height:{ideal:720}}
+    });
+  }
+
+  document.getElementById('go-live-btn').addEventListener('click', async () => {
+    const name = document.getElementById('display-name').value.trim() || 'Qonaq';
+    myUsername = name;
+    const statusEl = document.getElementById('setup-status');
+    statusEl.textContent = 'Qoşulur...';
+    try {
+      if (!ws || ws.readyState !== WebSocket.OPEN) await connectWs();
+      localPhotoUrl=selectedMode==='photo'?await uploadLivePhoto():'';
+      localMedia=await createSelectedLiveStream(selectedMode);
+      isSeat=true;
+      attachStream(localMedia, null, name);
+
+      document.getElementById('room-title-text').textContent = name;
+      document.getElementById('leave-btn').textContent = 'Bitir';
+      document.getElementById('setup-view').style.display = 'none';
+      document.getElementById('room-view').classList.add('open');
+
+      wsSend({ type: 'start_live', room_id: requestedRoomId || null, has_camera: localMedia.getVideoTracks().length>0, mode: selectedMode, photo_url: localPhotoUrl });
+      isSeat = true;
+      document.getElementById('guest-invite-btn').style.display = 'flex';
+      document.getElementById('pk-invite-btn').style.display = 'flex';
+      document.getElementById('pk-invite-btn').onclick = openPkPicker;
+    } catch (e) {
+      statusEl.textContent = 'Xəta: ' + e.message;
+      console.error(e);
+    }
+  });
+
+  document.getElementById('invite-send').addEventListener('click', () => {
+    const targetRoom = document.getElementById('target-room-input').value.trim();
+    if (!targetRoom) return;
+    document.getElementById('invite-modal').classList.remove('open');
+    wsSend({type:'start_pk',stream_id:currentStreamId,opponent_stream_id:Number(targetRoom)});
+  });
+  document.getElementById('incoming-decline').addEventListener('click', () => { document.getElementById('incoming-modal').classList.remove('open'); if(window.__pendingPkInvite) wsSend({type:'respond_pk',stream_id:currentStreamId,invite_id:window.__pendingPkInvite.invite_id,accept:false}); });
+  document.getElementById('incoming-accept').addEventListener('click', () => { document.getElementById('incoming-modal').classList.remove('open'); if(window.__pendingPkInvite) wsSend({type:'respond_pk',stream_id:currentStreamId,invite_id:window.__pendingPkInvite.invite_id,accept:true}); });
+
+  document.getElementById('guest-incoming-decline').addEventListener('click', () => {
+    document.getElementById('guest-incoming-modal').classList.remove('open');
+    if(window.__pendingGuestInvite) wsSend({type:'respond_to_invite',stream_id:window.__pendingGuestInvite.stream_id,accept:false});
+  });
+  document.getElementById('guest-incoming-accept').addEventListener('click', async () => {
+    document.getElementById('guest-incoming-modal').classList.remove('open');
+    if(!window.__pendingGuestInvite)return;
+    try {
+      peers.forEach(p=>p.close()); peers.clear();
+      localMedia=await navigator.mediaDevices.getUserMedia({audio:true,video:true});
+    } catch(e) {
+      try { localMedia=await navigator.mediaDevices.getUserMedia({audio:true,video:false}); }
+      catch(e2) {
+        try { localMedia=await navigator.mediaDevices.getUserMedia({audio:false,video:true}); }
+        catch(e3) { showToast('Kamera və mikrofon icazəsi verilmədi'); return; }
+        showToast('Mikrofon bağlıdır; qonaq kamera ilə qoşuldu');
+      }
+    }
+    attachStream(localMedia,null,myUsername||'Sən');
+    wsSend({type:'respond_to_invite',stream_id:window.__pendingGuestInvite.stream_id,accept:true,has_camera:localMedia.getVideoTracks().length>0,photo_url:localPhotoUrl});
+  });
+  document.getElementById('seat-request-btn').addEventListener('click',function(){if(!currentStreamId)return;wsSend({type:'request_live_seat',stream_id:currentStreamId});this.disabled=true;setTimeout(()=>{this.disabled=false;},15000);});
+  document.getElementById('seat-request-decline').addEventListener('click',()=>{document.getElementById('seat-request-modal').classList.remove('open');const req=window.__pendingSeatRequest;if(req)wsSend({type:'decline_live_seat_request',stream_id:req.stream_id,target_user_id:req.user_id});});
+  document.getElementById('seat-request-accept').addEventListener('click',()=>{document.getElementById('seat-request-modal').classList.remove('open');const req=window.__pendingSeatRequest;if(req)wsSend({type:'invite_to_live',stream_id:req.stream_id,target_user_id:req.user_id});});
+  document.getElementById('top-supporters').addEventListener('click',()=>{
+    renderGiftLeaderboard();
+    document.getElementById('leaderboard-modal').classList.add('open');
+  });
+  document.getElementById('leaderboard-close').addEventListener('click',()=>document.getElementById('leaderboard-modal').classList.remove('open'));
+  document.getElementById('leaderboard-modal').addEventListener('click',event=>{
+    if(event.target===event.currentTarget)event.currentTarget.classList.remove('open');
+  });
+
+  document.getElementById('mic-btn').addEventListener('click', function() {
+    if (!localMedia) return; const tracks=localMedia.getAudioTracks(); const enabled=tracks.some(t=>t.enabled); tracks.forEach(t=>t.enabled=!enabled);
+    wsSend({type:'toggle_mic',stream_id:currentStreamId,muted:enabled}); this.classList.toggle('off',enabled);
+  });
+  document.getElementById('cam-btn').addEventListener('click', async function() {
+    if(!localMedia)return;
+    let tracks=localMedia.getVideoTracks();
+    if(!tracks.length){
+      try{const camera=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false});tracks=camera.getVideoTracks();tracks.forEach(track=>{localMedia.addTrack(track);peers.forEach(pc=>pc.addTrack(track,localMedia));});for(const id of peers.keys())offerTo(id).catch(console.error);attachStream(localMedia,null,myUsername||'Sən');}
+      catch(e){showToast('Kamera icazəsi verilmədi');return;}
+    }else{const enabled=tracks.some(track=>track.enabled);tracks.forEach(track=>track.enabled=!enabled);}
+    const off=!tracks.some(track=>track.enabled);this.classList.toggle('off',off);this.textContent=off?'🚫':'📹';wsSend({type:'toggle_camera',stream_id:currentStreamId,off});
+  });
+
+  document.getElementById('leave-btn').addEventListener('click', () => {
+    if (isHost) wsSend({type:'stop_live',stream_id:currentStreamId}); else if(isSeat) wsSend({type:'leave_seat',stream_id:currentStreamId}); else wsSend({type:'leave_live',stream_id:currentStreamId});
+    peers.forEach(p=>p.close()); if(photoStreamStop)photoStreamStop(); if(localMedia)localMedia.getTracks().forEach(t=>t.stop());
+    if (ws) ws.close();
+    location.reload();
+  });
+
+  document.getElementById('chat-send-btn').addEventListener('click', sendRoomChat);
+  document.getElementById('room-chat-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRoomChat(); }
+  });
+
+  function spawnHeart(x, y) {
+    const container = document.getElementById('heart-fly-container');
+    const el = document.createElement('div');
+    el.className = 'fly-heart';
+    el.textContent = ['♥','💗','💖','💕'][Math.floor(Math.random()*4)];
+    el.style.left = (x - 14) + 'px';
+    el.style.top = (y - 14) + 'px';
+    container.appendChild(el);
+    setTimeout(() => el.remove(), 2200);
+  }
+  document.getElementById('video-stage').addEventListener('click', (e) => {
+    if (!currentStreamId) return;
+    resumeRemoteMedia();
+    wsSend({ type: 'live_like', stream_id: currentStreamId });
+    spawnHeart(e.clientX, e.clientY);
+  });
+
+  function renderLiveGrid(streams) {
+    window.__liveListCache = streams;
+    const grid = document.getElementById('live-grid'), empty = document.getElementById('browse-empty');
+    if (!streams.length) { grid.innerHTML = ''; empty.style.display = 'block'; return; }
+    empty.style.display = 'none';
+    grid.innerHTML = streams.map(s => `
+      <div class="live-card" onclick="joinLive(${s.id})">
+        <div class="thumb"><img src="${s.photo || ('https://i.pravatar.cc/200?u='+s.id)}"><span class="live-badge">CANLI</span><span class="seat-count-badge">${s.seat_count}</span>
+        <span class="live-viewers">${s.viewer_count}</span></div>
+        <div class="info"><div class="name">${s.name}</div></div>
+      </div>`).join('');
+  }
+  function refreshLiveList() { wsSend({ type: 'get_live_list' }); }
+
+  function renderPkPicker() {
+    const list = document.getElementById('pk-picker-list');
+    const others = (window.__liveListCache || []).filter(s => !s.pk_active && String(s.id) !== String(currentStreamId));
+    if (!others.length) {
+      list.innerHTML = '<div style="text-align:center; color:var(--muted); font-size:13px; padding:20px;">Hazirda basqa canli yayimci yoxdur</div>';
+    } else {
+      list.innerHTML = others.map(s => `
+        <div style="display:flex; align-items:center; gap:10px; padding:8px; border-radius:12px; background:rgba(255,255,255,0.04);">
+          <img src="${s.photo || ('https://i.pravatar.cc/100?u='+s.id)}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;">
+          <div style="flex:1; font-size:13.5px; font-weight:700;">${s.name}</div>
+          <button style="border:0; border-radius:10px; padding:8px 12px; font-size:12px; font-weight:800; cursor:pointer; background:linear-gradient(120deg,var(--gold),#ffb020); color:#0B0B12;" onclick="sendPkInvite(${s.id})">Dəvət et</button>
+        </div>`).join('');
+    }
+  }
+  function openPkPicker() {
+    showToast('Yaxında işləyəcək');
+  }
+
+  function openGuestPicker() {
+    showToast('Yaxında işləyəcək');
+  }
+  function renderGuestPicker(viewers) {
+    const list=document.getElementById('guest-picker-list');
+    if(!viewers.length){list.innerHTML='<div style="text-align:center;color:var(--muted);padding:20px;">Dəvət ediləcək giriş etmiş izləyici yoxdur</div>';return;}
+    list.innerHTML=viewers.map(v=>`<div style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:12px;background:rgba(255,255,255,.04)"><img src="${v.photo||('https://i.pravatar.cc/100?u='+v.user_id)}" style="width:40px;height:40px;border-radius:50%;object-fit:cover"><div style="flex:1;font-size:13.5px;font-weight:700">${v.name}</div><button style="border:0;border-radius:10px;padding:8px 12px;font-weight:800;cursor:pointer" onclick="inviteGuest('${v.user_id}')">Qaldır</button></div>`).join('');
+  }
+  function inviteGuest(userId){showToast('Yaxında işləyəcək');}
+  document.getElementById('guest-invite-btn').addEventListener('click',openGuestPicker);
+  document.getElementById('guest-picker-close').addEventListener('click',()=>document.getElementById('guest-picker-modal').classList.remove('open'));
+  document.getElementById('pk-picker-close').addEventListener('click', () => {
+    document.getElementById('pk-picker-modal').classList.remove('open');
+  });
+
+  function sendPkInvite(targetRoom) {
+    showToast('Yaxında işləyəcək');
+  }
+
+  document.getElementById('open-setup-btn').addEventListener('click', () => {
+    document.getElementById('browse-view').style.display = 'none';
+    document.getElementById('setup-view').style.display = 'block';
+  });
+  document.getElementById('broadcaster-rank-btn').addEventListener('click',()=>{document.getElementById('broadcaster-modal').classList.add('open');broadcasterPeriod='daily';document.querySelectorAll('.rank-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.period==='daily'));renderBroadcasterLeaderboard();['daily','weekly','monthly'].forEach(period=>wsSend({type:'get_broadcaster_leaderboard',period}));});
+  document.getElementById('broadcaster-close').addEventListener('click',()=>document.getElementById('broadcaster-modal').classList.remove('open'));
+  document.querySelectorAll('.rank-tabs button').forEach(btn=>btn.addEventListener('click',()=>{broadcasterPeriod=btn.dataset.period;document.querySelectorAll('.rank-tabs button').forEach(b=>b.classList.toggle('active',b===btn));renderBroadcasterLeaderboard();wsSend({type:'get_broadcaster_leaderboard',period:broadcasterPeriod});}));
+  document.getElementById('setup-back-btn').addEventListener('click', () => {
+    if (requestedRoomId) { window.location.href = '/room?id=' + encodeURIComponent(requestedRoomId); return; }
+    document.getElementById('setup-view').style.display = 'none';
+    document.getElementById('browse-view').style.display = 'block';
+  });
+
+  async function joinLive(streamId) {
+    const stream = (window.__liveListCache || []).find(s => s.id === streamId);
+    if (!stream) { showToast('Bu yayıma qoşulmaq mümkün deyil'); return; }
+    try {
+      if (!ws || ws.readyState !== WebSocket.OPEN) await connectWs();
+      isHost=false;isSeat=false;seats={};window.currentHostId=null;
+      peers.forEach(peer=>peer.close());peers.clear();pendingIce.clear();remoteMedia.clear();
+      if(localMedia)localMedia.getTracks().forEach(track=>track.stop());localMedia=null;
+      closePkPanel();
+      currentStreamId = streamId;
+      wsSend({ type: 'join_live', stream_id: streamId });
+
+      document.getElementById('browse-view').style.display = 'none';
+      document.getElementById('setup-view').style.display = 'none';
+      document.getElementById('room-view').classList.add('open');
+      document.getElementById('room-title-text').textContent = stream.name;
+      document.getElementById('mic-btn').style.display = 'none';
+      document.getElementById('cam-btn').style.display = 'none';
+      document.getElementById('seat-request-btn').style.display = 'flex';
+      document.getElementById('guest-invite-btn').style.display = 'none';
+      document.getElementById('leave-btn').textContent = 'Çıx';
+      document.getElementById('pk-invite-btn').style.display = 'none';
+    } catch (e) {
+      showToast('Qosulma xetasi: ' + e.message);
+      console.error(e);
+    }
+  }
+
+  (async function initBrowsePage() {
+    const token = localStorage.getItem('authToken');
+    if (!token) { window.location.href = '/login-v2'; return; }
+    try { const r=await fetch('/api/live-rtc-config',{headers:{'Authorization':'Bearer '+token}}); if(r.ok){const c=await r.json();if(Array.isArray(c.iceServers)&&c.iceServers.length)rtcIceServers=c.iceServers;} } catch(e) {}
+    try { await connectWs(); } catch (e) { console.warn('WS qosulmadi:', e); }
+    if (requestedRoomId) {
+      document.getElementById('browse-view').style.display='none';
+      document.getElementById('setup-view').style.display='block';
+      document.querySelector('.ice-title').textContent='OTAQ '+requestedRoomId;
+      document.querySelector('.setup-header p').textContent='Bu otaqda canlı aç və ya mövcud yayıma qoşul';
+      wsSend({type:'join_live', room_id:requestedRoomId});
+    } else {
+      refreshLiveList();
+      setInterval(refreshLiveList, 8000);
+    }
+  })();
+</script>
+</body>
+</html>
