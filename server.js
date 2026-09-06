@@ -143,6 +143,27 @@ app.post('/api/login', async (req, res) => {
     }
 });
 // Xal-i coin-e cevirmek (magaza)
+app.post('/api/shop/buy-coins', authLib.requireUser, (req, res) => {
+    try {
+        const SHOP_RATES = { 10:0, 50:0, 100:10, 200:40, 500:150, 1000:350, 5000:1750 };
+        const price = Number((req.body || {}).amount);
+        if (!Number.isFinite(price) || !(price in SHOP_RATES)) {
+            return res.status(400).json({ error: 'invalid_params' });
+        }
+        const bonus = SHOP_RATES[price];
+        const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+        if (!user) return res.status(404).json({ error: 'not_found' });
+        if (user.crystals < price) return res.status(400).json({ error: 'insufficient_crystals' });
+        const coinsToAdd = price + bonus;
+        db.prepare('UPDATE users SET crystals = crystals - ?, coins = coins + ? WHERE id = ?').run(price, coinsToAdd, user.id);
+        db.prepare("INSERT INTO transactions (user_id, type, amount, reason) VALUES (?, 'crystals', ?, 'shop_buy_coins')").run(user.id, -price);
+        db.prepare("INSERT INTO transactions (user_id, type, amount, reason) VALUES (?, 'coins', ?, 'shop_buy_coins')").run(user.id, coinsToAdd);
+        res.json({ success: true, coins_added: coinsToAdd });
+    } catch (error) {
+        console.error('shop/buy-coins error:', error);
+        res.status(500).json({ error: 'server_error' });
+    }
+});
 app.post('/api/game/purchase-gold', authLib.requireUser, (req, res) => {
     try {
         const { gold, price } = req.body || {};
