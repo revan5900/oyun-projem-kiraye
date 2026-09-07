@@ -87627,7 +87627,8 @@ const ActionsJSX = p => preact_module_("div", {
   onClick: () => p.onsendmessage()
 }), preact_module_("div", {
   class: UserProfileDialog_cls('action', ['message']),
-  onClick: () => p.onopenprivatechat && p.onopenprivatechat()
+  onClick: () => p.onopenprivatechat && p.onopenprivatechat(),
+  style: 'box-shadow:0 0 10px 3px rgba(255,200,50,0.9), inset 0 0 4px rgba(255,255,255,0.5);border:2px solid gold;border-radius:50%;'
 }));
 const SocialButtonJSX = p => {
   if (!p.social) return null;
@@ -104881,7 +104882,11 @@ class ChatPresenter {
       color: '#25D366',
       text: '[Mexfi] ',
       classList: undefined
-    }, this.formatUser(sender), {
+    }, this.formatUser(sender), receiver ? {
+      bold: true,
+      text: ' -> ' + this.formatUserName(receiver),
+      classList: ['chat__sender-name']
+    } : undefined, {
       bold: false,
       text: ': ',
       classList: undefined
@@ -104889,7 +104894,7 @@ class ChatPresenter {
       bold: false,
       text: this.escape(text),
       classList: ['chat__word-break']
-    }];
+    }].filter(Boolean);
     this.chatView.addMessageLine({
       lines,
       sender: this.messageUser(sender),
