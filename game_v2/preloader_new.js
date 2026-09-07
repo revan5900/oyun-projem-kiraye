@@ -79035,7 +79035,7 @@ class GameSession {
   }
   _recv_game_private_message(obj) {
     const sender = this.session.getOrCreateUser(Number(obj.sender_id));
-    sender.updateShort({ id: Number(obj.sender_id), name: obj.sender_name });
+    sender.updateShort({ id: Number(obj.sender_id), name: obj.sender_name, male: obj.sender_male });
     if (this.chat) this.chat.privateGameMessage(sender, this.session.viewer, obj.body, obj.timestamp);
   }
   _recv_private_message(obj) {
@@ -104874,7 +104874,6 @@ class ChatPresenter {
   }
   privateGameMessage(sender, receiver, text, ts) {
     this.batcher.flush();
-    console.log('DEBUG privateGameMessage text:', JSON.stringify(text));
     if (!text) return;
     const lines = [{
       bold: true,
@@ -104887,7 +104886,7 @@ class ChatPresenter {
       classList: undefined
     }, {
       bold: false,
-      text: ``,
+      text: this.escape(text),
       classList: ['chat__word-break']
     }];
     this.chatView.addMessageLine({
@@ -121719,6 +121718,7 @@ class UserProfilePresenter {
       chatPresenter.receiver = user;
       root.dialogManager.closeExclusiveGroup('drawer');
       chatPresenter.__privateMode = Boolean(isPrivate);
+      chatPresenter.__privateReceiver = isPrivate ? user : undefined;
     }
   }
   showByIdImpl(userId) {
@@ -137582,9 +137582,10 @@ class SessionFactory {
     } : undefined;
     chatPresenter.onachievement = (receiver, achievement) => this.achievement.showAchievement(receiver, achievement);
     chatPresenter.onsend = (text, receiver) => {
-      if (chatPresenter.__privateMode && receiver) {
-        session.router.send({ type: 'game_private_message', receiver_id: String(receiver.id), body: text });
-        chatPresenter.privateGameMessage(session.viewer, receiver, text, Date.now());
+      if (chatPresenter.__privateMode && chatPresenter.__privateReceiver) {
+        const pr = chatPresenter.__privateReceiver;
+        session.router.send({ type: 'game_private_message', receiver_id: String(pr.id), body: text });
+        chatPresenter.privateGameMessage(session.viewer, pr, text, Date.now());
         chatPresenter.onViewerSendMessage();
         return;
       }
