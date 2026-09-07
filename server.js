@@ -1376,6 +1376,15 @@ const wsPingInterval = setInterval(() => {
     client.isAlive = false;
     client.ping();
   });
+  liveStreamsMap.forEach((s, streamId) => {
+    const host = s.seats.get(s.hostId);
+    const hostAlive = Boolean(host && host.ws && host.ws.readyState === 1);
+    if (!hostAlive) {
+      console.log('WS: olu canli yayim temizlendi - id=' + streamId);
+      liveBroadcast(s, { type: 'live_ended', stream_id: streamId });
+      liveStreamsMap.delete(streamId);
+    }
+  });
 }, 25000);
 
 
