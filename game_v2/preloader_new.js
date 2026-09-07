@@ -87412,6 +87412,7 @@ class UserProfileDialog extends Dialog {
         chatBtnEnabled: !!props.chatBtnEnabled,
         onsendgift: props.onsendgift,
         onsendmessage: props.onsendmessage,
+        onopenprivatechat: props.onopenprivatechat,
         onachievements: props.onachievements,
         linkOpener: props.linkOpener
       })), ((_l = props.user) === null || _l === void 0 ? void 0 : _l.label) && preact_module_("div", {
@@ -87618,6 +87619,9 @@ const ActionsJSX = p => preact_module_("div", {
 }), preact_module_("div", {
   class: UserProfileDialog_cls('action', p.chatBtnEnabled ? ['message'] : ['message', 'disabled']),
   onClick: () => p.onsendmessage()
+}), preact_module_("div", {
+  class: UserProfileDialog_cls('action', ['message']),
+  onClick: () => p.onopenprivatechat && p.onopenprivatechat()
 }));
 const SocialButtonJSX = p => {
   if (!p.social) return null;
@@ -121726,6 +121730,7 @@ class UserProfilePresenter {
         photos,
         onachievements: () => this.cb.onachievements(user, profile.achievements),
         onsendmessage: () => this.showChatReceiver(user),
+        onopenprivatechat: () => window.openFriendChat(String(user.id), user.name, user.photoUrl || ''),
         onsendgift: () => this.cb.onsendgift(user),
         onclaim: user.viewer ? undefined : () => this.showClaimActions(user, profile),
         oncup: () => this.cb.onleague(user, profile.league),
