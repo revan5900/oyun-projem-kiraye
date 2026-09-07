@@ -2219,13 +2219,12 @@ if (wsUser) {
         const lastClaim = db.prepare('SELECT value FROM app_settings WHERE key = ?').get('daily_bonus_claim_' + wsUser.id);
         if (!lastClaim || lastClaim.value !== today) {
           const dayNum = ((wsUser.daily_bonus_streak || 0) % 5) + 1;
-          const goldAmount = dayNum * 10;
+          const goldAmount = dayNum;
           db.prepare('UPDATE users SET coins = coins + ? WHERE id = ?').run(goldAmount, wsUser.id);
           db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('daily_bonus_claim_' + wsUser.id, today);
           ws.send(encodeMessage({
             packet: ws.packetCounter = (ws.packetCounter||1000)+1,
             type: 'gold_daily',
-            packet: ws.packetCounter++,
             day: dayNum,
             gold_diff: goldAmount
           }));
