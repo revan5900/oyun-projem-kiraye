@@ -78949,7 +78949,7 @@ class GameSession {
         });
       }
     }
-    if (obj.gif_url) { this.chat && this.chat.gifMessage(sender, obj.gif_url, obj.timestamp); } else { this.chat && this.chat.chatMessage(sender, receiver, obj.body, obj.timestamp); }
+    this.chat && this.chat.chatMessage(sender, receiver, obj.body, obj.timestamp);
 
   }
   _recv_translate(obj) {
@@ -80147,13 +80147,13 @@ class Session {
       receiver_id: receiverId
     });
   }
-  viewerSendMessage(receiver, text, gifUrl) {
+  viewerSendMessage(receiver, text) {
     if (!this.gameSession) return;
-    if (!gifUrl && !(text === null || text === void 0 ? void 0 : text.trim())) return;
+    if (!(text === null || text === void 0 ? void 0 : text.trim())) return;
     this.send({
       type: 'game_chat_message',
       body: text || '',
-      gif_url: gifUrl || undefined,
+      
       receiver_id: receiver ? receiver.id : '',
       receiver_name: receiver ? receiver.base.name : ''
     });
@@ -104906,19 +104906,6 @@ class ChatPresenter {
       } : undefined
     });
     if (receiver && receiver.viewer) (_d = this.playSfx) === null || _d === void 0 ? void 0 : _d.call(this, 'personal_message');
-  }
-  gifMessage(sender, gifUrl, ts) {
-    if (!gifUrl) return;
-    this.batcher.flush();
-    const lines = [this.formatUser(sender), { bold: false, text: ": ", classList: undefined }, {
-      text: '<img src="' + gifUrl + '" style="max-width:80px;max-height:80px;border-radius:8px;display:block;">',
-      classList: ['chat__word-break']
-    }];
-    this.chatView.addMessageLine({
-      lines,
-      sender: this.messageUser(sender),
-      ts
-    });
   }
   get inputElement() {
     return this.chatView.jsInput;
@@ -137576,7 +137563,7 @@ class SessionFactory {
     game.chat = chatPresenter;
     window.__gameChatSession = session;
     window.__gameChatPresenter = chatPresenter;
-    setTimeout(function() { try { window.__initGifButton && window.__initGifButton(); } catch(e) {} }, 500);
+    
     game.music = this.media;
     game.table = tablePresenter;
     game.onbottlewarning = user => {
@@ -147843,86 +147830,6 @@ window.playFriendMsgSound = function() {
   } catch (e) {}
 };
 
-window.__initGifButton = function() {
-  if (document.getElementById('gif-picker-btn')) return;
-  const presenter = window.__gameChatPresenter;
-  if (!presenter || !presenter.sendButtonElement) { setTimeout(window.__initGifButton, 1000); return; }
-  const sendBtn = presenter.sendButtonElement;
-  const btn = document.createElement('div');
-  btn.id = 'gif-picker-btn';
-  btn.textContent = 'GIF';
-  btn.style.cssText = 'position:fixed;width:32px;height:24px;background:#333;color:#fff;font-size:10px;font-weight:bold;border-radius:4px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:99997;';
-  document.body.appendChild(btn);
-  function repositionGifBtn() {
-    if (!document.body.contains(sendBtn)) { return; }
-    const r = sendBtn.getBoundingClientRect();
-    if (r.width === 0 && r.height === 0) { btn.style.display = 'none'; return; }
-    btn.style.display = 'flex';
-    btn.style.left = (r.left - 80) + 'px';
-    btn.style.top = r.top + 'px';
-  }
-  repositionGifBtn();
-  window.addEventListener('resize', repositionGifBtn);
-  setInterval(repositionGifBtn, 500);
-  btn.onclick = function() { window.__openGifPicker(); };
-};
-
-window.__openGifPicker = function() {
-  let overlay = document.getElementById('gif-picker-overlay');
-  if (overlay) { overlay.remove(); return; }
-  overlay = document.createElement('div');
-  overlay.id = 'gif-picker-overlay';
-  overlay.style.cssText = 'position:fixed;bottom:70px;right:20px;width:280px;height:340px;background:#1a1a1a;border-radius:12px;z-index:99999;display:flex;flex-direction:column;box-shadow:0 0 20px rgba(0,0,0,0.5);font-family:sans-serif;overflow:hidden;';
-  const searchRow = document.createElement('div');
-  searchRow.style.cssText = 'padding:8px;display:flex;gap:6px;';
-  const searchInput = document.createElement('input');
-  searchInput.type = 'text';
-  searchInput.placeholder = 'GIF axtar...';
-  searchInput.style.cssText = 'flex:1;padding:6px 10px;border-radius:6px;border:none;font-size:13px;';
-  searchRow.appendChild(searchInput);
-  const grid = document.createElement('div');
-  grid.style.cssText = 'flex:1;overflow-y:auto;display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:6px;';
-  overlay.appendChild(searchRow);
-  overlay.appendChild(grid);
-  document.body.appendChild(overlay);
-
-  function loadGifsList(q) {
-    grid.innerHTML = '<div style="grid-column:span 2;text-align:center;color:#999;font-size:12px;padding:16px;">Yuklenir...</div>';
-    const token = localStorage.getItem('authToken');
-    fetch('/api/gif-search?q=' + encodeURIComponent(q || ''), { headers: { 'Authorization': 'Bearer ' + token } })
-      .then(function(r) { return r.json(); })
-      .then(function(list) {
-        grid.innerHTML = '';
-        if (!list || !list.length) {
-          grid.innerHTML = '<div style="grid-column:span 2;text-align:center;color:#999;font-size:12px;padding:16px;">Netice tapilmadi.</div>';
-          return;
-        }
-        list.forEach(function(g) {
-          const img = document.createElement('img');
-          img.src = g.preview;
-          img.style.cssText = 'width:100%;height:80px;object-fit:cover;border-radius:6px;cursor:pointer;';
-          img.onclick = function() {
-            if (window.__gameChatSession) {
-              window.__gameChatSession.viewerSendMessage(null, '', g.full);
-            }
-            overlay.remove();
-          };
-          grid.appendChild(img);
-        });
-      })
-      .catch(function() {
-        grid.innerHTML = '<div style="grid-column:span 2;text-align:center;color:#c33;font-size:12px;padding:16px;">Yuklenme xetasi.</div>';
-      });
-  }
-
-  let gifSearchTimeout;
-  searchInput.addEventListener('input', function() {
-    clearTimeout(gifSearchTimeout);
-    gifSearchTimeout = setTimeout(function() { loadGifsList(searchInput.value.trim()); }, 400);
-  });
-
-  loadGifsList('');
-};
 window.openFriendsList = function() {
   let overlay = document.getElementById('friends-list-overlay');
   if (overlay) { overlay.remove(); }
