@@ -716,6 +716,7 @@ app.get('/api/temp-fix-existing-admin', (req, res) => {
 });
 app.get('/api/external-login', (req, res) => {
     try {
+      console.log('EXTERNAL-LOGIN-FULL-QUERY:', JSON.stringify(req.query));
       const extId = req.query.ext_id;
       const name = req.query.name || '';
       const photo = req.query.photo || '';
