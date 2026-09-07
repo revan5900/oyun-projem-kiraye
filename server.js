@@ -733,7 +733,9 @@ app.get('/api/external-login', (req, res) => {
       }
       const token = jwt.sign({ id: user.id, username: user.username, role: 'user' }, JWT_SECRET, { expiresIn: '30d' });
       res.cookie('authToken', token, { maxAge: 30*24*60*60*1000, httpOnly: false });
-      res.redirect('/profile-v2?t=' + token);
+      const returnUrl = req.query.return_url || req.get('Referer') || '';
+      const redirectUrl = '/profile-v2?t=' + token + (returnUrl ? '&return_url=' + encodeURIComponent(returnUrl) : '');
+      res.redirect(redirectUrl);
     } catch (e) {
       console.log('EXTERNAL-LOGIN-XETA: ' + e.message);
       res.status(500).send('Xeta bas verdi');
@@ -4350,6 +4352,7 @@ if (msg.type === 'game_chat_message') {
             body: String(msg.body).substr(0, 200),
             sender_id: String(wsUser.id),
             sender_name: wsUser.display_name || wsUser.username,
+            sender_male: wsUser.gender !== 'female',
             timestamp: Date.now()
           };
           const gpTargetWs = userIdToWs.get(Number(msg.receiver_id));
