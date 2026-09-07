@@ -4343,6 +4343,20 @@ if (msg.type === 'game_chat_message') {
             senderWsReject.send(encodeMessage({ packet: senderWsReject.packetCounter = (senderWsReject.packetCounter||1000)+1, type: 'date_invite_rejected', target_name: wsUser.display_name || wsUser.username }));
           }
         }
+      } else if (msg.type === 'game_private_message') {
+        if (wsUser && msg.receiver_id && msg.body) {
+          const gpMsg = {
+            type: 'game_private_message',
+            body: String(msg.body).substr(0, 200),
+            sender_id: String(wsUser.id),
+            sender_name: wsUser.display_name || wsUser.username,
+            timestamp: Date.now()
+          };
+          const gpTargetWs = userIdToWs.get(Number(msg.receiver_id));
+          if (gpTargetWs && gpTargetWs.readyState === WebSocket.OPEN) {
+            gpTargetWs.send(encodeMessage(gpMsg));
+          }
+        }
       } else if (msg.type === 'private_message') {
         if (wsUser && msg.receiver_id && msg.body) {
           const isFriend = db.prepare("SELECT 1 FROM friendships WHERE ((user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)) AND status = ? AND (expires_at IS NULL OR expires_at > datetime('now'))").get(wsUser.id, Number(msg.receiver_id), Number(msg.receiver_id), wsUser.id, 'accepted');

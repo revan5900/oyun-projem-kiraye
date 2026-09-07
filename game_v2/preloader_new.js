@@ -79033,6 +79033,11 @@ class GameSession {
     window.alert(obj.friend_name + ' dostluq teklifinizi qebul etdi!');
     window.openFriendChat(obj.friend_id, obj.friend_name);
   }
+  _recv_game_private_message(obj) {
+    const sender = this.session.getOrCreateUser(Number(obj.sender_id));
+    sender.updateShort({ id: Number(obj.sender_id), name: obj.sender_name });
+    if (this.chat) this.chat.privateGameMessage(sender, this.session.viewer, obj.body, obj.timestamp);
+  }
   _recv_private_message(obj) {
     if (!obj.to_self) { window.playFriendMsgSound(); }
     const otherPartyId = obj.to_self ? obj.receiver_id : obj.sender_id;
@@ -104866,6 +104871,29 @@ class ChatPresenter {
       msg.lines.push(suffix);
     }
     this.chatView.addInfoLine(msg);
+  }
+  privateGameMessage(sender, receiver, text, ts) {
+    this.batcher.flush();
+    if (!text) return;
+    const lines = [{
+      bold: true,
+      color: '#25D366',
+      text: '?? ',
+      classList: undefined
+    }, this.formatUser(sender), {
+      bold: false,
+      text: ': ',
+      classList: undefined
+    }, {
+      bold: false,
+      text: ``,
+      classList: ['chat__word-break']
+    }];
+    this.chatView.addMessageLine({
+      lines,
+      sender: this.messageUser(sender),
+      ts
+    });
   }
   chatMessage(sender, receiver, text, ts) {
     var _a, _b, _c, _d;
@@ -137554,7 +137582,8 @@ class SessionFactory {
     chatPresenter.onachievement = (receiver, achievement) => this.achievement.showAchievement(receiver, achievement);
     chatPresenter.onsend = (text, receiver) => {
       if (chatPresenter.__privateMode && receiver) {
-        session.router.send({ type: 'private_message', receiver_id: String(receiver.id), body: text });
+        session.router.send({ type: 'game_private_message', receiver_id: String(receiver.id), body: text });
+        chatPresenter.privateGameMessage(session.viewer, receiver, text, Date.now());
         chatPresenter.onViewerSendMessage();
         return;
       }
