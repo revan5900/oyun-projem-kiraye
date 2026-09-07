@@ -716,7 +716,6 @@ app.get('/api/temp-fix-existing-admin', (req, res) => {
 });
 app.get('/api/external-login', (req, res) => {
     try {
-      console.log('EXTERNAL-LOGIN-FULL-QUERY:', JSON.stringify(req.query));
       const extId = req.query.ext_id;
       const name = req.query.name || '';
       const photo = req.query.photo || '';
@@ -734,8 +733,9 @@ app.get('/api/external-login', (req, res) => {
       }
       const token = jwt.sign({ id: user.id, username: user.username, role: 'user' }, JWT_SECRET, { expiresIn: '30d' });
       res.cookie('authToken', token, { maxAge: 30*24*60*60*1000, httpOnly: false });
-      const returnUrl = req.query.return_url || req.get('Referer') || '';
-      console.log('EXTERNAL-LOGIN-DEBUG referer:', req.get('Referer'), 'query.return_url:', req.query.return_url);
+      const passParam = req.query.pass;
+      const reconstructedGulUrl = (extId && passParam) ? ('https://gul.az/chat/enter.php?id=' + extId + '&ps=' + encodeURIComponent(passParam)) : '';
+      const returnUrl = reconstructedGulUrl || req.query.return_url || req.get('Referer') || '';
       const redirectUrl = '/profile-v2?t=' + token + (returnUrl ? '&return_url=' + encodeURIComponent(returnUrl) : '');
       res.redirect(redirectUrl);
     } catch (e) {
