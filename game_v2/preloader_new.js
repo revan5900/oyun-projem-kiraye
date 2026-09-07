@@ -79035,7 +79035,8 @@ class GameSession {
   }
   _recv_game_private_message(obj) {
     const sender = this.session.getOrCreateUser(Number(obj.sender_id));
-    sender.updateShort({ id: Number(obj.sender_id), name: obj.sender_name, male: obj.sender_male });
+    sender.updateShort({ id: Number(obj.sender_id), name: obj.sender_name, male: obj.sender_male, color: sender.color || 'aec6ff' });
+    window.playFriendMsgSound && window.playFriendMsgSound();
     if (this.chat) this.chat.privateGameMessage(sender, this.session.viewer, obj.body, obj.timestamp);
   }
   _recv_private_message(obj) {
@@ -104878,7 +104879,7 @@ class ChatPresenter {
     const lines = [{
       bold: true,
       color: '#25D366',
-      text: '?? ',
+      text: '[Mexfi] ',
       classList: undefined
     }, this.formatUser(sender), {
       bold: false,
