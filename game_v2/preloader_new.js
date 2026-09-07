@@ -104874,6 +104874,7 @@ class ChatPresenter {
   }
   privateGameMessage(sender, receiver, text, ts) {
     this.batcher.flush();
+    console.log('DEBUG privateGameMessage text:', JSON.stringify(text));
     if (!text) return;
     const lines = [{
       bold: true,
