@@ -121670,7 +121670,7 @@ class UserProfilePresenter {
   showById(userId) {
     this.showByIdImpl(userId);
   }
-  showChatReceiver(user) {
+  showChatReceiver(user, isPrivate) {
     const {
       chatPresenter,
       root,
@@ -121689,6 +121689,7 @@ class UserProfilePresenter {
     if (chatPresenter) {
       chatPresenter.receiver = user;
       root.dialogManager.closeExclusiveGroup('drawer');
+      chatPresenter.__privateMode = Boolean(isPrivate);
     }
   }
   showByIdImpl(userId) {
@@ -121730,7 +121731,7 @@ class UserProfilePresenter {
         photos,
         onachievements: () => this.cb.onachievements(user, profile.achievements),
         onsendmessage: () => this.showChatReceiver(user),
-        onopenprivatechat: () => window.openFriendChat(String(user.id), user.name, user.photoUrl || ''),
+        onopenprivatechat: () => this.showChatReceiver(user, true),
         onsendgift: () => this.cb.onsendgift(user),
         onclaim: user.viewer ? undefined : () => this.showClaimActions(user, profile),
         oncup: () => this.cb.onleague(user, profile.league),
@@ -137552,6 +137553,11 @@ class SessionFactory {
     } : undefined;
     chatPresenter.onachievement = (receiver, achievement) => this.achievement.showAchievement(receiver, achievement);
     chatPresenter.onsend = (text, receiver) => {
+      if (chatPresenter.__privateMode && receiver) {
+        session.router.send({ type: 'private_message', receiver_id: String(receiver.id), body: text });
+        chatPresenter.onViewerSendMessage();
+        return;
+      }
       if (!session.viewer.isVip && containsEmoji(text)) {
         this.emoji.showWarning(() => {
           session.viewerSendMessage(receiver, text);
