@@ -1374,24 +1374,20 @@ const wss = new WebSocket.Server({ server, path: '/ws/' });
 const wsPingInterval = setInterval(() => {
   wss.clients.forEach((client) => {
     if (client.isAlive === false) {
-      console.log('WS: ping cavabsiz, baglanti bagladi');
-      return client.terminate();
+      client.missedPings = (client.missedPings || 0) + 1;
+
+      if (client.missedPings >= 3) {
+        console.log('WS: 3 ping cavabsiz, baglanti baglandi');
+        return client.terminate();
+      }
+    } else {
+      client.missedPings = 0;
     }
+
     client.isAlive = false;
     client.ping();
   });
-  liveStreamsMap.forEach((s, streamId) => {
-    const host = s.seats.get(s.hostId);
-    const hostAlive = Boolean(host && host.ws && host.ws.readyState === 1);
-    if (!hostAlive) {
-      console.log('WS: olu canli yayim temizlendi - id=' + streamId);
-      liveBroadcast(s, { type: 'live_ended', stream_id: streamId });
-      liveStreamsMap.delete(streamId);
-    }
-  });
 }, 25000);
-
-
 function addKissLeagueScore(userId, amount) {
   const today = new Date().toISOString().slice(0, 10);
   const row = db.prepare('SELECT daily_kiss_league_points, daily_kiss_league_limit, daily_kiss_limit_date FROM users WHERE id = ?').get(userId);
