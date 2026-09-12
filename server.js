@@ -2241,6 +2241,10 @@ if (wsUser) {
               oldRoom.players.delete(oldWs);
               if (oldRoom.stickedGifts) oldRoom.stickedGifts.delete(myId);
               broadcastToRoom(oldRoom, oldWs, { type: 'game_leave', user: { id: myId } });
+              if (oldWs.readyState === WebSocket.OPEN) {
+                oldWs.send(encodeMessage({ type: 'other_client_shutdown', packet: oldWs.packetCounter = (oldWs.packetCounter||1000)+1 }));
+                oldWs.close(4001, 'replaced_by_new_connection');
+              }
               console.log('WS: kohne xeyal nusxe silindi - ' + myId);
             }
           }
@@ -2783,14 +2787,31 @@ if (wsUser) {
         }
         if (['game_hat', 'game_gift', 'game_drink', 'game_gesture'].indexOf(msg.type) >= 0 && wsUser) {
           const giftId = msg.gift_type || msg.hat_type || msg.drink_type || msg.gesture_type || '';
+          if (msg.type !== 'game_gesture') {
+            const nowTs = Date.now();
+            const recentGifts = (ws.recentGameGifts || []).filter(ts => nowTs - ts < 2000);
+            if (recentGifts.length >= 100) {
+              ws.recentGameGifts = recentGifts;
+              return;
+            }
+            recentGifts.push(nowTs);
+            ws.recentGameGifts = recentGifts;
+          }
+          if (msg.receiver_id && ws.gameRoom) {
+            let receiverStillHere = false;
+            ws.gameRoom.players.forEach((p) => { if (String(p.id) === String(msg.receiver_id)) receiverStillHere = true; });
+            if (!receiverStillHere) {
+              console.log('WS: hediyye redd edildi - receiver otaqdan cixib - ' + wsUser.username);
+              return;
+            }
+          }
           const price = GIFT_PRICES[giftId] !== undefined ? GIFT_PRICES[giftId] : 0;
           if (price > 0) {
-            const currentUser = db.prepare('SELECT coins FROM users WHERE id = ?').get(wsUser.id);
-            if (!currentUser || currentUser.coins < price) {
+            const charge = db.prepare('UPDATE users SET coins = coins - ? WHERE id = ? AND coins >= ?').run(price, wsUser.id, price);
+            if (!charge.changes) {
               console.log('WS: hediyye redd edildi - kifayet qeder coin yoxdur - ' + wsUser.username + ' gift=' + giftId + ' price=' + price);
               return;
             }
-            db.prepare('UPDATE users SET coins = coins - ? WHERE id = ?').run(price, wsUser.id);
             addDailyLeagueScore(wsUser.id, 1);
             console.log('WS: hediyye ucun coin cixarildi - ' + wsUser.username + ' gift=' + giftId + ' price=' + price);
             if (msg.receiver_id && ws.gameRoom && ws.gameRoom.currentSong && ws.gameRoom.currentSong.sender && String(ws.gameRoom.currentSong.sender.id) === String(msg.receiver_id)) {
