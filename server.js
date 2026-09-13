@@ -44,6 +44,7 @@ function getInnertube() {
 
 
 const app = express();
+app.use(compression());
 
 app.get('/api/test123', (req, res) => { res.send('TEST ISLEYIR'); });
 app.use(cors({ origin: ALLOWED_ORIGINS, credentials: true }));
@@ -1907,6 +1908,7 @@ wss.on('connection', (ws, req) => {
       if (wsUser && wsUser.is_banned) {
         console.log('WS: banli istifadeci qosulma cehdi - ' + wsUser.username);
         ws.send(encodeMessage({ type: 'error', error: 'banned', packet: 1 }));
+        clearInterval(activityInterval);
         ws.close();
         return;
       }      if (wsUser) userIdToWs.set(wsUser.id, ws);
@@ -2808,7 +2810,7 @@ if (wsUser) {
         }
         if (['game_hat', 'game_gift', 'game_drink', 'game_gesture'].indexOf(msg.type) >= 0 && wsUser) {
           const giftId = msg.gift_type || msg.hat_type || msg.drink_type || msg.gesture_type || '';
-          if (msg.type !== 'game_gesture') {
+          {
             const nowTs = Date.now();
             const recentGifts = (ws.recentGameGifts || []).filter(ts => nowTs - ts < 2000);
             if (recentGifts.length >= 100) {
@@ -4448,7 +4450,7 @@ if (msg.type === 'game_chat_message') {
     clearInterval(activityInterval);
     console.log('WS: baglandi');
     if (ws.nightRoomId) leaveNightRoom(ws, 'disconnect');
-    if (wsUser) userIdToWs.delete(wsUser.id);
+    if (wsUser && userIdToWs.get(wsUser.id) === ws) userIdToWs.delete(wsUser.id);
     if (ws.gameRoom) {
       removePlayerFromRoom(ws.gameRoom, ws);
     }

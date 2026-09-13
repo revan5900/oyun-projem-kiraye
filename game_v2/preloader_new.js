@@ -141074,6 +141074,15 @@ class Root {
     this.numSkip = 0;
     this.prevSkip = 0;
     htmlRoot.classList.add('bottle');
+    try {
+      const __ro = new ResizeObserver(entries => {
+        for (const entry of entries) {
+          const cr = entry.contentRect;
+          if (this.root && (this.root.width !== cr.width || this.root.height !== cr.height)) this.updateLayout();
+        }
+      });
+      __ro.observe(htmlRoot);
+    } catch (roErr) {}
     this.updateOrientation();
     this.root = new Group();
     this.root.useHandCursor = false;
@@ -141423,12 +141432,6 @@ class Root {
     var _a, _b, _c, _d;
     (_a = this.texturePanel) === null || _a === void 0 ? void 0 : _a.update(TableView.numTextures, 1000);
     if (this.last === 0) this.last = ts;
-    if (!this._lastSizeCheckTs || ts - this._lastSizeCheckTs >= 150) {
-      this._lastSizeCheckTs = ts;
-      const w = this.htmlRoot.clientWidth;
-      const h = this.htmlRoot.clientHeight;
-      if (this.root.width !== w || this.root.height !== h) this.updateLayout();
-    }
     const dt = (ts - this.last) / 1000;
     this.last = ts;
     this.updateScrollToTopAfterInput();
