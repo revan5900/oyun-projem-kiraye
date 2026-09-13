@@ -141423,9 +141423,12 @@ class Root {
     var _a, _b, _c, _d;
     (_a = this.texturePanel) === null || _a === void 0 ? void 0 : _a.update(TableView.numTextures, 1000);
     if (this.last === 0) this.last = ts;
-    const w = this.htmlRoot.clientWidth;
-    const h = this.htmlRoot.clientHeight;
-    if (this.root.width !== w || this.root.height !== h) this.updateLayout();
+    if (!this._lastSizeCheckTs || ts - this._lastSizeCheckTs >= 150) {
+      this._lastSizeCheckTs = ts;
+      const w = this.htmlRoot.clientWidth;
+      const h = this.htmlRoot.clientHeight;
+      if (this.root.width !== w || this.root.height !== h) this.updateLayout();
+    }
     const dt = (ts - this.last) / 1000;
     this.last = ts;
     this.updateScrollToTopAfterInput();
