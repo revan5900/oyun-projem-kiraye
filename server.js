@@ -147,7 +147,7 @@ app.post('/api/login', async (req, res) => {
 // Xal-i coin-e cevirmek (magaza)
 app.post('/api/shop/buy-coins', authLib.requireUser, (req, res) => {
     try {
-        const SHOP_RATES = { 10:0, 50:1, 100:5, 250:20, 500:75, 1000:200, 5000:1500, 10000:4000 };
+        const SHOP_RATES = { 10:0, 50:0, 100:10, 200:40, 500:150, 1000:350, 5000:1750 };
         const price = Number((req.body || {}).amount);
         if (!Number.isFinite(price) || !(price in SHOP_RATES)) {
             return res.status(400).json({ error: 'invalid_params' });
@@ -1390,18 +1390,20 @@ const wss = new WebSocket.Server({ server, path: '/ws/' });
 const wsPingInterval = setInterval(() => {
   wss.clients.forEach((client) => {
     if (client.isAlive === false) {
-      client.missedPings = (client.missedPings || 0) + 1;
-
-      if (client.missedPings >= 3) {
-        console.log('WS: 3 ping cavabsiz, baglanti baglandi');
-        return client.terminate();
-      }
-    } else {
-      client.missedPings = 0;
+      console.log('WS: ping cavabsiz, baglanti bagladi');
+      return client.terminate();
     }
-
     client.isAlive = false;
     client.ping();
+  });
+  liveStreamsMap.forEach((s, streamId) => {
+    const host = s.seats.get(s.hostId);
+    const hostAlive = Boolean(host && host.ws && host.ws.readyState === 1);
+    if (!hostAlive) {
+      console.log('WS: olu canli yayim temizlendi - id=' + streamId);
+      liveBroadcast(s, { type: 'live_ended', stream_id: streamId });
+      liveStreamsMap.delete(streamId);
+    }
   });
 }, 25000);
 function addKissLeagueScore(userId, amount) {
