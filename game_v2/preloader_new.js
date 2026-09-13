@@ -106383,6 +106383,19 @@ class GiftAnimations {
   }
   flyGift(s, r, gift, giftView) {
     var _a;
+    if ((this.activeGiftAnimations || 0) >= 50) {
+      if (!this.pendingGiftAnimations) this.pendingGiftAnimations = [];
+      if (this.pendingGiftAnimations.length < 80) this.pendingGiftAnimations.push([s, r, gift, giftView]);
+      return;
+    }
+    this.activeGiftAnimations = (this.activeGiftAnimations || 0) + 1;
+    window.setTimeout(() => {
+      this.activeGiftAnimations = Math.max(0, (this.activeGiftAnimations || 1) - 1);
+      if (this.pendingGiftAnimations && this.pendingGiftAnimations.length > 0) {
+        const nextArgs = this.pendingGiftAnimations.shift();
+        this.flyGift(nextArgs[0], nextArgs[1], nextArgs[2], nextArgs[3]);
+      }
+    }, 2000);
     if (!this.calcGiftPosition(r, gift)) return;
     const sv = this.getUserView(s.id);
     if (!sv) return;
@@ -141330,7 +141343,27 @@ class Root {
         patchScrollOverflow(el);
       }
     };
-    setInterval(checkScrolls, 5000);
+    checkScrolls();
+    try {
+      const __scrollMO = new MutationObserver((mutations) => {
+        for (const mut of mutations) {
+          mut.addedNodes && mut.addedNodes.forEach((node) => {
+            if (node.nodeType !== 1) return;
+            const check = (el) => {
+              const { overflow, overflowY, overflowX } = getComputedStyle(el);
+              const scrollStates = ['auto', 'scroll'];
+              if (scrollStates.indexOf(overflow) >= 0 || scrollStates.indexOf(overflowY) >= 0 || scrollStates.indexOf(overflowX) >= 0) {
+                el.style.overscrollBehavior = 'contain';
+                patchScrollOverflow(el);
+              }
+            };
+            check(node);
+            if (node.querySelectorAll) node.querySelectorAll('*').forEach(check);
+          });
+        }
+      });
+      __scrollMO.observe(document.body, { childList: true, subtree: true });
+    } catch (moErr) {}
     const allowEvents = new WeakMap();
     const patchScrollOverflow = el => {
       const ATTR = 'swipe-patch';
