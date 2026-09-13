@@ -70310,7 +70310,7 @@ const UniversalPlayer = compat_module_D((props, playerRef) => {
   return preact_module_("div", {
     class: clsJoin(props.className, UniversalPlayer_cls('')),
     ref: ref,
-    style: props.provider === 'cz' ? { opacity: 0, pointerEvents: 'none', position: 'absolute', width: '1px', height: '1px', overflow: 'hidden' } : undefined
+    style: props.provider === 'cz' ? { opacity: 0, pointerEvents: 'none', position: 'fixed', left: '-9999px', top: '-9999px' } : undefined
   }, preact_module_("div", {
     class: UniversalPlayer_cls('thumbnail', [showThumbnail ? undefined : 'hidden']),
     style: thumbnailStyles
