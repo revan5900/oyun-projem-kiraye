@@ -2353,9 +2353,12 @@ if (wsUser) {
         if (realElapsedSec > safeDuration) {
           songReplay.start_timestamp = Date.now() - (safeDuration * 1000);
         }
-        if (!ws.packetCounter) ws.packetCounter = 1000;
-        songReplay.packet = ws.packetCounter++;
-        ws.send(encodeMessage(songReplay));
+        setTimeout(() => {
+          if (ws.readyState !== 1) return;
+          if (!ws.packetCounter) ws.packetCounter = 1000;
+          songReplay.packet = ws.packetCounter++;
+          ws.send(encodeMessage(songReplay));
+        }, 1500);
       }
       startBottleTurn(myRoom);      } else if (msg.type === 'gold2tokens_get') {
         const tokensGetResponse = {
@@ -3510,6 +3513,20 @@ if (msg.type === 'game_chat_message') {
             }
             console.log('WS: konkret masaya qowuldu - masa=' + targetRoom.gameId);
             broadcastToRoom(targetRoom, ws, { type: 'game_join', user: rejoinedPlayerX });
+            if (targetRoom.currentSong && (Date.now() - targetRoom.currentSong.start_timestamp) < ((targetRoom.currentSong.duration || 240) * 1000)) {
+              const songReplayX = Object.assign({}, targetRoom.currentSong);
+              const realElapsedSecX = (Date.now() - songReplayX.start_timestamp) / 1000;
+              const safeDurationX = (songReplayX.duration || 999) - 5;
+              if (realElapsedSecX > safeDurationX) {
+                songReplayX.start_timestamp = Date.now() - (safeDurationX * 1000);
+              }
+              setTimeout(() => {
+                if (ws.readyState !== 1) return;
+                if (!ws.packetCounter) ws.packetCounter = 1000;
+                songReplayX.packet = ws.packetCounter++;
+                ws.send(encodeMessage(songReplayX));
+              }, 1500);
+            }
             startBottleTurn(targetRoom);
           }
         } else {
@@ -3557,6 +3574,9 @@ if (msg.type === 'game_chat_message') {
     }
     ws.liveStreamId = null;
 } else if (msg.type === 'get_live_list') {
+    const nowGll = Date.now();
+    if (ws.lastGetLiveList && nowGll - ws.lastGetLiveList < 2000) return;
+    ws.lastGetLiveList = nowGll;
     const list = [];
     liveStreamsMap.forEach((s) => {
       const host = s.seats.get(s.hostId);

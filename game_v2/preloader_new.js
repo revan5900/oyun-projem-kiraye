@@ -141330,7 +141330,7 @@ class Root {
         patchScrollOverflow(el);
       }
     };
-    setInterval(checkScrolls, 500);
+    setInterval(checkScrolls, 5000);
     const allowEvents = new WeakMap();
     const patchScrollOverflow = el => {
       const ATTR = 'swipe-patch';
