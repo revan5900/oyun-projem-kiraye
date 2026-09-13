@@ -70410,6 +70410,7 @@ class MusicViewPreact {
           setMuteToggleCount(1);
         }
         setLastMuteToggleTime(now);
+        window.__wantMusicMuted = muted;
         (_a = p.onMuteChanged) === null || _a === void 0 ? void 0 : _a.call(p, muted);
       };
       hooks_module_(() => {
@@ -70429,6 +70430,9 @@ class MusicViewPreact {
       hooks_module_y(() => {
         if (!playerReady || !playerRef.current) return;
         playerRef.current.updateSoundSettings(p.muted, p.volume);
+        const onMuteToggled = () => { if (playerRef.current) playerRef.current.updateSoundSettings(p.muted, p.volume); };
+        window.addEventListener('musicMuteToggled', onMuteToggled);
+        return () => window.removeEventListener('musicMuteToggled', onMuteToggled);
       }, [playerReady, p.muted, p.volume]);
       hooks_module_y(() => {
         return () => {
@@ -136908,7 +136912,7 @@ class MediaPresenter {
     const origin = (ytItem === null || ytItem === void 0 ? void 0 : ytItem.type) === 'yt' ? ytItem.origin : undefined;
     this.musicView = factory.createMusicView({
       pageInteractionSignal: root.onPageInteraction,
-      muted: !coordinator.enabled,
+      muted: !coordinator.enabled || Boolean(window.__wantMusicMuted),
       hidden: coordinator.hidden,
       volume: coordinator.volume,
       unmutedAutoplayRequiresAction: config.unmuteRequiresUserAction || config.autoplayRequiresUserAction,
@@ -141077,7 +141081,7 @@ class Root {
     document.addEventListener('touchstart', this.onUserAction, passiveOps(true));
     document.addEventListener('touchend', this.onUserAction, true);
     document.addEventListener('click', this.onUserAction, true);
-    document.addEventListener('click', function(e) { var t = e.target && e.target.closest ? e.target.closest('[class*=player-controls__mute]') : null; if (t) { window.__wantMusicMuted = !window.__wantMusicMuted; } }, true);
+    document.addEventListener('click', function(e) { var t = e.target && e.target.closest ? e.target.closest('[class*=player-controls__mute]') : null; if (t) { window.__wantMusicMuted = !window.__wantMusicMuted; window.dispatchEvent(new Event('musicMuteToggled')); } }, true);
     if ((screenfull_default()) && (screenfull_default()).enabled) {
       screenfull_default().on('change', this.onFullscreenChange);
     }
