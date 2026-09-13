@@ -35,7 +35,7 @@ body {
 <script>
 function start() {
   window["splash"] && splash(
-    {"publicPath":"","js":["splash_new.js?v=1787896431","preloader_new.js?v=1789263122923"],"css":["preloader_new.css"]},
+    {"publicPath":"","js":["splash_new.js?v=1787896431","preloader_new.js?v=1789265013230"],"css":["preloader_new.css"]},
     document.getElementById("game")
   );
 }
@@ -97,7 +97,6 @@ function start() {
     if (window.knSendGameMessage) window.knSendGameMessage(obj);
   }
   function knHandleMessage(msg) {
-    console.log('KN-DEBUG msg type:', msg.type);
     if (msg.type === 'user_kickout') {
       console.log('KN-DEBUG user_kickout alindi:', JSON.stringify(msg));
       fetch('/api/profile/me', { headers: { 'Authorization': 'Bearer ' + localStorage.getItem('authToken') } })
