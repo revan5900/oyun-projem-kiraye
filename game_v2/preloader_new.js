@@ -62623,7 +62623,7 @@ class BoosterFactory {
 
 var MusicProvider;
 (function (MusicProvider) {
-  const VIDEO = new Set(['vv', 'yt', 'ok', 'vm', 'web']);
+  const VIDEO = new Set(['vv', 'yt', 'ok', 'vm', 'web', 'cz']);
   MusicProvider.isVideo = provider => VIDEO.has(provider);
 })(MusicProvider || (MusicProvider = {}));
 var IMusicItem;
@@ -70242,6 +70242,7 @@ const createPlayer = (el, props, onPlayerReady) => {
         player = new VKVideoPlayer(playerConfig);
         break;
       case 'yt':
+      case 'cz':
         player = new YouTubePlayer(playerConfig);
         break;
       case 'ok':
@@ -70308,7 +70309,8 @@ const UniversalPlayer = compat_module_D((props, playerRef) => {
   }
   return preact_module_("div", {
     class: clsJoin(props.className, UniversalPlayer_cls('')),
-    ref: ref
+    ref: ref,
+    style: props.provider === 'cz' ? { opacity: 0, pointerEvents: 'none', position: 'absolute', width: '1px', height: '1px', overflow: 'hidden' } : undefined
   }, preact_module_("div", {
     class: UniversalPlayer_cls('thumbnail', [showThumbnail ? undefined : 'hidden']),
     style: thumbnailStyles
@@ -136976,7 +136978,7 @@ class MediaPresenter {
       this.ctx.root.playerVisible = true;
       song.sender.music.isDj = true;
       coordinator.onMusicChanged.emit();
-      const timeToStopSec = Math.max(0, music.duration - startTs.passedTimeSec);
+      const rawDuration = Number(music.duration); const safeDuration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 240; const timeToStopSec = Math.max(5, safeDuration - startTs.passedTimeSec);
       this.currentMusicTimeoutID = window.setTimeout(() => this.stop(), timeToStopSec * 1000);
       (_b = this.musicView) === null || _b === void 0 ? void 0 : _b.setParams(p => Object.assign(Object.assign({}, p), {
         song: song,
@@ -138861,6 +138863,7 @@ function main(env, factory, social, config, registrationInfo, registrationPhoto)
     const socket = socketFactory();
     socket.onrecvcomplete = () => env.root.update();
     const s = new Session(socket, env.root.timer);
+    window.knSendGameMessage = obj => s.send(obj);
     const sessionFactory = new SessionFactory(s, factory, trans, env, social, config, locale, coordinator);
     const yandex = new YAPresenter(sessionFactory);
     s.allowNativeAppPromo = config.allowNativeAppPromo;

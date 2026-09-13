@@ -33,6 +33,8 @@ const db = require('./db');
 const game = require('./game');
 const authLib = require('./auth');
 const ytsr = require('@distube/ytsr');
+process.on('unhandledRejection', (reason) => { console.error('UNHANDLED-REJECTION (server crash qarsisi alindi):', reason && reason.message ? reason.message : reason); });
+process.on('uncaughtException', (err) => { console.error('UNCAUGHT-EXCEPTION (server crash qarsisi alindi):', err && err.message ? err.message : err); });
 const { Innertube } = require('youtubei.js');
 let innertubePromise = null;
 function getInnertube() {
@@ -145,7 +147,7 @@ app.post('/api/login', async (req, res) => {
 // Xal-i coin-e cevirmek (magaza)
 app.post('/api/shop/buy-coins', authLib.requireUser, (req, res) => {
     try {
-        const SHOP_RATES = { 10:0, 50:0, 100:10, 200:40, 500:150, 1000:350, 5000:1750 };
+        const SHOP_RATES = { 10:0, 50:1, 100:5, 250:20, 500:75, 1000:200, 5000:1500, 10000:4000 };
         const price = Number((req.body || {}).amount);
         if (!Number.isFinite(price) || !(price in SHOP_RATES)) {
             return res.status(400).json({ error: 'invalid_params' });
@@ -1208,6 +1210,20 @@ app.get('/api/youtube/search', async (req, res) => {
     }
 });app.get('/api/ciliz-music/get_by_ids_and_popular', async (req, res) => {
     try {
+        const idsParam = String(req.query.ids || '').trim();
+        if (idsParam) {
+          const idsList = idsParam.split(',').map(s => s.trim()).filter(Boolean).slice(0, 50);
+          const idResults = await Promise.all(idsList.map(async (vid) => {
+            try {
+              const oembedUrl = 'https://www.youtube.com/oembed?url=' + encodeURIComponent('https://www.youtube.com/watch?v=' + vid) + '&format=json';
+              const oRes = await fetch(oembedUrl);
+              if (!oRes.ok) return null;
+              const oData = await oRes.json();
+              return { artist: oData.author_name || '', duration: 0, id: vid, title: oData.title || '', url: 'https://www.youtube.com/watch?v=' + vid, provider: 'cz' };
+            } catch (oembedErr) { return null; }
+          }));
+          return res.json(idResults.filter(Boolean));
+        }
         const count = req.query.count || 20;
         const cacheKey = 'cilizmusicpopular_' + count;
         const cachedPop = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(cacheKey);
