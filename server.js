@@ -249,7 +249,7 @@ app.post('/api/profile/avatar', authLib.requireUser, (req, res) => {
 // Avatari HTTP ile gostermek (WebSocket mesaj olcusu limitine dusmemek ucun)
 app.get('/api/avatar/:id', (req, res) => {
     const user = db.prepare('SELECT avatar_data FROM users WHERE id = ?').get(req.params.id);
-    if (!user || !user.avatar_data) return res.status(404).send('No avatar');
+    if (!user || !user.avatar_data || user.avatar_data.includes('no_profil')) return res.status(404).send('No avatar');
     if (user.avatar_data.startsWith('http://') || user.avatar_data.startsWith('https://')) {
         return res.redirect(user.avatar_data);
     }
@@ -408,7 +408,7 @@ app.get('/api/assets-proxy', async (req, res) => {
           console.log('WS: assets-proxy - nailiyyet heddleri 2x cetinlesdirildi');
         }
         try {
-          require('fs').writeFileSync(require('path').join(__dirname, 'game-assets', 'assets.json'), JSON.stringify(json));
+          await require('fs').promises.writeFile(require('path').join(__dirname, 'game-assets', 'assets.json'), JSON.stringify(json));
           console.log('WS: assets-proxy - lokal fayl yenilendi');
         } catch (saveErr) {
           console.error('assets-proxy lokal saxlama xetasi:', saveErr.message);
@@ -1391,8 +1391,13 @@ const wss = new WebSocket.Server({ server, path: '/ws/' });
 const wsPingInterval = setInterval(() => {
   wss.clients.forEach((client) => {
     if (client.isAlive === false) {
-      console.log('WS: ping cavabsiz, baglanti bagladi');
-      return client.terminate();
+      client.missedPings = (client.missedPings || 0) + 1;
+      if (client.missedPings >= 2) {
+        console.log('WS: 2 ardicil ping cavabsiz, baglanti bagladi');
+        return client.terminate();
+      }
+    } else {
+      client.missedPings = 0;
     }
     client.isAlive = false;
     client.ping();
@@ -1707,6 +1712,7 @@ function liveLevelBadge(level) {
 
 function liveSend(client, payload) {
   if (!client || client.readyState !== WebSocket.OPEN) return;
+  if (client.bufferedAmount > 1000000) return;
   client.send(encodeMessage(Object.assign({}, payload, {
     packet: client.packetCounter = (client.packetCounter || 1000) + 1
   })));
@@ -1791,6 +1797,7 @@ function broadcastToRoom(room, excludeWs, msg) {
   console.log('BROADCAST-DEBUG: type=' + msg.type + ' room=' + room.gameId + ' total_players=' + room.players.size);
   room.players.forEach((player, clientWs) => {
     if (clientWs !== excludeWs && clientWs.readyState === WebSocket.OPEN) {
+      if (clientWs.bufferedAmount > 1000000) return;
       if (!clientWs.packetCounter) clientWs.packetCounter = 1000;
       msg.packet = clientWs.packetCounter++;
       clientWs.send(encodeMessage(msg));
@@ -1868,7 +1875,8 @@ function startBottleTurn(room) {
 }
 wss.on('connection', (ws, req) => {
   ws.isAlive = true;
-  ws.on('pong', () => { ws.isAlive = true; });
+  ws.missedPings = 0;
+  ws.on('pong', () => { ws.isAlive = true; ws.missedPings = 0; });
 
   var allowedOrigins = ALLOWED_ORIGINS;
   var requestOrigin = String(req.headers.origin || '');
@@ -1885,16 +1893,7 @@ wss.on('connection', (ws, req) => {
   const activityInterval = setInterval(() => {
     if (wsUser) {
       const todayAct = new Date().toISOString().slice(0, 10);
-      const actRow = db.prepare('SELECT daily_active_seconds, daily_active_date FROM users WHERE id = ?').get(wsUser.id);
-      if (!actRow) return;
-      let newSeconds;
-      if (actRow.daily_active_date !== todayAct) {
-        newSeconds = 60;
-        db.prepare('UPDATE users SET daily_active_seconds = 60, daily_active_date = ?, claimed_hour_milestones = ? WHERE id = ?').run(todayAct, '', wsUser.id);
-      } else {
-        newSeconds = actRow.daily_active_seconds + 60;
-        db.prepare('UPDATE users SET daily_active_seconds = daily_active_seconds + 60 WHERE id = ?').run(wsUser.id);
-      }
+      db.prepare('UPDATE users SET daily_active_seconds = CASE WHEN daily_active_date = ? THEN daily_active_seconds + 60 ELSE 60 END, claimed_hour_milestones = CASE WHEN daily_active_date = ? THEN claimed_hour_milestones ELSE ? END, daily_active_date = ? WHERE id = ?').run(todayAct, todayAct, '', todayAct, wsUser.id);
     }
   }, 60000);
 

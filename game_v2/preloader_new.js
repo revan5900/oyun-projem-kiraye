@@ -106395,7 +106395,7 @@ class GiftAnimations {
         const nextArgs = this.pendingGiftAnimations.shift();
         this.flyGift(nextArgs[0], nextArgs[1], nextArgs[2], nextArgs[3]);
       }
-    }, 2000);
+    }, 5300);
     if (!this.calcGiftPosition(r, gift)) return;
     const sv = this.getUserView(s.id);
     if (!sv) return;
