@@ -79342,6 +79342,9 @@ class Session {
     this.socket.onclose = function () {
       let e = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
       var _a;
+      if (e && e.code && e.code !== 1000) {
+        return (_a = _this.onerror) === null || _a === void 0 ? void 0 : _a.call(_this, new Error('auto_reconnect'));
+      }
       return (_a = _this.onerror) === null || _a === void 0 ? void 0 : _a.call(_this);
     };
     this.socket.open();
