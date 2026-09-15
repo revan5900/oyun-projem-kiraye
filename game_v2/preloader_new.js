@@ -51167,6 +51167,21 @@ const MOUSE_POINTER_ID = 1,
      * @param nativeEvent - The native mouse/pointer/touch events.
      */
     onPointerMove(nativeEvent) {
+      this.pendingPointerMove = nativeEvent;
+      if (this.pointerMoveFrame != null) return;
+      this.pointerMoveFrame = globalThis.requestAnimationFrame(() => {
+        this.pointerMoveFrame = null;
+        const event = this.pendingPointerMove;
+        this.pendingPointerMove = null;
+        if (event && this.domElement) this.processPointerMove(event);
+      });
+    }
+    cancelPointerMove() {
+      if (this.pointerMoveFrame != null) globalThis.cancelAnimationFrame(this.pointerMoveFrame);
+      this.pointerMoveFrame = null;
+      this.pendingPointerMove = null;
+    }
+    processPointerMove(nativeEvent) {
       if (!this.features.move) return;
       this.rootBoundary.rootTarget = this.renderer.lastObjectRendered, EventsTicker.pointerMoved();
       const normalizedEvents = this.normalizeToPointerData(nativeEvent);
@@ -51181,6 +51196,7 @@ const MOUSE_POINTER_ID = 1,
      * @param nativeEvent - The native mouse/pointer/touch event.
      */
     onPointerUp(nativeEvent) {
+      this.cancelPointerMove();
       if (!this.features.click) return;
       this.rootBoundary.rootTarget = this.renderer.lastObjectRendered;
       let target = nativeEvent.target;
@@ -51237,6 +51253,7 @@ const MOUSE_POINTER_ID = 1,
     }
     /** Unregister event listeners on {@link PIXI.EventSystem#domElement this.domElement}. */
     removeEvents() {
+      this.cancelPointerMove();
       if (!this.eventsAdded || !this.domElement) return;
       EventsTicker.removeTickerListener();
       const style = this.domElement.style;
@@ -64052,7 +64069,7 @@ class OKSocial {
       const p = this.API_callbackResult('loadAd');
       FAPI.UI.loadAd();
       const result = yield p;
-      console.log(`loadAd: ${JSON.stringify(result)}`);
+      globalThis.DEBUG_GAME_LOGS && console.log(`loadAd: ${JSON.stringify(result)}`);
       if (result.result !== 'ok') return undefined;
       return {
         show: () => this.showRewardedVideo()
@@ -64064,7 +64081,7 @@ class OKSocial {
       const p = this.API_callbackResult('showLoadedAd');
       FAPI.UI.showLoadedAd();
       const result = yield p;
-      console.log(`showLoadedAd: ${JSON.stringify(result)}`);
+      globalThis.DEBUG_GAME_LOGS && console.log(`showLoadedAd: ${JSON.stringify(result)}`);
       this.rewardedVideo = undefined;
       if (result.result !== 'ok') {
         throw new Error(JSON.stringify(result));
@@ -64104,7 +64121,7 @@ class OKSocial {
           resolve(data);
           return;
         }
-        console.log(origParams);
+        globalThis.DEBUG_GAME_LOGS && console.log(origParams);
         if (this.shouldSkipReport(error)) {
           console.error(`FAPI ${params.method} skipped error:`, error);
           reject();
@@ -64212,7 +64229,7 @@ function resizeCanvas(img, mode, maxWidth, maxHeight) {
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(scale * img.width);
     canvas.height = Math.round(scale * img.height);
-    console.log(`resize: ${img.width}x${img.height} => ${canvas.width}x${canvas.height}`);
+    globalThis.DEBUG_GAME_LOGS && console.log(`resize: ${img.width}x${img.height} => ${canvas.width}x${canvas.height}`);
     const ctx = canvas.getContext('2d');
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     img = canvas;
@@ -64243,13 +64260,13 @@ function saveAsJPG(canvas, p) {
     let iter = 0;
     let resized = canvas;
     while (true) {
-      console.log(`saveAsJPG: ${canvas.width}x${canvas.height} => ${w}x${h}`);
+      globalThis.DEBUG_GAME_LOGS && console.log(`saveAsJPG: ${canvas.width}x${canvas.height} => ${w}x${h}`);
       resized = resizeCanvas(resized, 'fit', w, h);
       const blob = yield new Promise(resolve => resized.toBlob(resolve, 'image/jpeg', 1));
       if (!blob) return undefined;
       if (!(p === null || p === void 0 ? void 0 : p.maxSizeInMB)) return blob;
       const sizeInMB = blob.size / (1024 * 1024);
-      console.log('saveAsJPG:', w, h, sizeInMB);
+      globalThis.DEBUG_GAME_LOGS && console.log('saveAsJPG:', w, h, sizeInMB);
       if (sizeInMB < p.maxSizeInMB) return blob;
       const scale = Math.sqrt(p.maxSizeInMB / sizeInMB);
       w = Math.floor(scale * w);
@@ -66577,13 +66594,13 @@ function HTMLAudioElement_safePlay(audio) {
     audio.pause();
   }
   const promise = audio.play();
-  if (promise) promise.catch(e => console.log('HTMLAudioPlayer.safePlayAudio', e));
+  if (promise) promise.catch(e => globalThis.DEBUG_GAME_LOGS && console.log('HTMLAudioPlayer.safePlayAudio', e));
 }
 function HTMLAudioElement_safeSeek(audio, positionSec) {
   try {
     audio.currentTime = positionSec;
   } catch (e) {
-    console.log('HTMLAudioElement_safeSeek', e);
+    globalThis.DEBUG_GAME_LOGS && console.log('HTMLAudioElement_safeSeek', e);
   }
   audio.onloadedmetadata = () => {
     audio.currentTime = positionSec;
@@ -69753,7 +69770,7 @@ class VimeoPlayer {
       (_a = this.onPlayerReady) === null || _a === void 0 ? void 0 : _a.call(this);
       if (this.autoplay) {
         this.seekToCurrentTime();
-        player.play().catch(err => console.log('[Vimeo] autoplay blocked', err));
+        player.play().catch(err => globalThis.DEBUG_GAME_LOGS && console.log('[Vimeo] autoplay blocked', err));
       }
     };
     this.onTimeUpdate = data => {
@@ -70012,19 +70029,44 @@ class VKVideoPlayer {
 const ERR_ZERO_DURATION = -1;
 class YouTubePlayer {
   static prepare() {
-    if (!YouTubePlayer.preparePromise) YouTubePlayer.preparePromise = YouTubePlayer.prepareImpl();
+    if (window.YT && typeof window.YT.Player === 'function') return Promise.resolve();
+    if (!YouTubePlayer.preparePromise) {
+      YouTubePlayer.preparePromise = YouTubePlayer.prepareImpl().catch(error => {
+        YouTubePlayer.preparePromise = null;
+        throw error;
+      });
+    }
     return YouTubePlayer.preparePromise;
   }
   static prepareImpl() {
-    return __awaiter(this, void 0, void 0, function* () {
-      const initPromise = new Promise(resolve => {
-        window.onYouTubeIframeAPIReady = resolve;
-      });
-      try {
-        yield loadJS('https://www.youtube.com/iframe_api');
-      } catch (e) {}
-      yield initPromise;
-      window.onYouTubeIframeAPIReady = undefined;
+    return new Promise((resolve, reject) => {
+      const previous = window.onYouTubeIframeAPIReady;
+      let script = document.querySelector('script[src*="youtube.com/iframe_api"]');
+      let settled = false;
+      const finish = error => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        script?.removeEventListener('error', onError);
+        if (window.onYouTubeIframeAPIReady === onReady) window.onYouTubeIframeAPIReady = previous;
+        if (error) { script?.remove(); reject(error); } else resolve();
+      };
+      const onError = () => finish(new Error('youtube_api_load_failed'));
+      const onReady = () => {
+        try { if (typeof previous === 'function') previous(); } catch (_) {}
+        if (window.YT && typeof window.YT.Player === 'function') finish();
+        else finish(new Error('youtube_api_not_ready'));
+      };
+      const timer = setTimeout(() => finish(new Error('youtube_api_timeout')), 10000);
+      window.onYouTubeIframeAPIReady = onReady;
+      if (!script) {
+        script = document.createElement('script');
+        script.src = 'https://www.youtube.com/iframe_api';
+        script.async = true;
+        script.addEventListener('error', onError);
+        document.head.appendChild(script);
+      } else script.addEventListener('error', onError);
+      if (window.YT && typeof window.YT.Player === 'function') finish();
     });
   }
   constructor(config) {
@@ -70061,7 +70103,7 @@ class YouTubePlayer {
       }
       (_b = this.onPlayerReady) === null || _b === void 0 ? void 0 : _b.call(this);
       if (this.autoplay) {
-        if (this.muted) {
+        if (this.muted || window.__wantMusicMuted) {
           this.player.mute();
         } else {
           this.player.setVolume(Math.max(0, Math.min(100, Math.round(this.volume * 100))));
@@ -70115,7 +70157,9 @@ class YouTubePlayer {
     el.appendChild(this.el);
   }
   play() {
-    this.initPlayer();
+    YouTubePlayer.prepare().then(() => {
+      if (!this.isDestroyed && !this._player) this.initPlayer();
+    }).catch(() => { if (!this.isDestroyed) this.onError?.('youtube_api_unavailable'); });
   }
   initPlayer() {
     if (this.isDestroyed) throw new Error('Trying to initialize destroyed player');
@@ -70149,9 +70193,10 @@ class YouTubePlayer {
     });
   }
   stopPlayer() {
-    if (!this.player) return;
-    this.player.destroy();
+    const player = this._player;
     this._player = undefined;
+    this.isPlayerReady = false;
+    if (player) player.destroy();
   }
   destroy() {
     var _a;
@@ -70292,13 +70337,14 @@ const UniversalPlayer = compat_module_D((props, playerRef) => {
     }
     if (!ref.current) return;
     if (!isVideo && !props.url) return;
+    setShowThumbnail(needThumbnail);
     const playerObj = createPlayer(ref.current, props, () => setShowThumbnail(false));
     if (playerRef && typeof playerRef === 'object') playerRef.current = playerObj;
     return () => {
       if (playerRef && typeof playerRef === 'object') playerRef.current = null;
       playerObj === null || playerObj === void 0 ? void 0 : playerObj.destroy();
     };
-  }, [props.url, isPreviewAudio]);
+  }, [props.url, props.provider, props.song?.song_id, isPreviewAudio]);
   if (isPreviewAudio) {
     return preact_module_("div", {
       class: UniversalPlayer_cls('audio-preview-container')
@@ -70860,7 +70906,7 @@ function useResizeSensor(el, update) {
         debug[jsize] = (debug[jsize] || 0) + 1;
         if (debug[jsize] > 20) {
           debug['captured'] = 1;
-          console.log(debug);
+          globalThis.DEBUG_GAME_LOGS && console.log(debug);
           exception(debugError);
         }
       }
@@ -71474,7 +71520,7 @@ function jsxReplaceTags(s) {
   const DEFAULT = {
     b: s => preact_module_("b", null, s)
   };
-  console.log('xml:', s);
+  globalThis.DEBUG_GAME_LOGS && console.log('xml:', s);
   const p = new DOMParser();
   const d = p.parseFromString(`<body>${s}</body>`, 'text/xml');
   const errorNode = d.querySelector('parsererror');
@@ -75240,10 +75286,10 @@ class ScalableSVGResource extends pixi_js_lib.BaseImageResource {
             document.body.appendChild(image);
             image.width = image.offsetWidth;
             image.height = image.offsetHeight;
-            console.log('offset-true:', isIE11, isEdge, image.offsetWidth, image.offsetHeight, image.width, image.height);
+            globalThis.DEBUG_GAME_LOGS && console.log('offset-true:', isIE11, isEdge, image.offsetWidth, image.offsetHeight, image.width, image.height);
             document.body.removeChild(image);
           } else {
-            console.log('offset-false');
+            globalThis.DEBUG_GAME_LOGS && console.log('offset-false');
           }
         }
         if (!image.width || !image.height) throw new Error(`No width or height in svg resource data`);
@@ -79342,7 +79388,7 @@ class Session {
     this.socket.onclose = function () {
       let e = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
       var _a;
-      if (e && e.code && e.code !== 1000) {
+      if (e && [1006, 1011, 1012, 1013, 4002].includes(e.code)) {
         return (_a = _this.onerror) === null || _a === void 0 ? void 0 : _a.call(_this, new Error('auto_reconnect'));
       }
       return (_a = _this.onerror) === null || _a === void 0 ? void 0 : _a.call(_this);
@@ -79351,6 +79397,7 @@ class Session {
   }
   onSocketError(e) {
     var _a;
+    if (e && e.type === 'error') { this.reconnect(); return; }
     if (this.reconnectAfterBackgroundErrors) {
       const isReconnect = this.recvCount === 0;
       if (!isReconnect && this.lastForegroundRecvCount === this.recvCount) {
@@ -79392,14 +79439,15 @@ class Session {
   }
   trackedRecv(obj) {
     var _a;
+    if (!Number.isSafeInteger(obj.packet)) { this.reconnect(); return; }
     this.recvCount++;
     if (typeof this.packet === 'undefined') {
       this.packet = obj.packet;
     } else {
-      this.packet = obj.packet;
-      if (this.packet !== obj.packet) {
-        console.log((_a = this.gameSession) === null || _a === void 0 ? void 0 : _a.usersLog);
-        console.error(`Incorrect packet number: session.${this.packet} !== recv.${obj.packet}`);
+      const expectedPacket = this.packet + 1;
+      if (!Number.isSafeInteger(obj.packet) || expectedPacket !== obj.packet) {
+        globalThis.DEBUG_GAME_LOGS && console.log((_a = this.gameSession) === null || _a === void 0 ? void 0 : _a.usersLog);
+        console.error(`Incorrect packet number: expected.${expectedPacket} !== recv.${obj.packet}`);
         if (this.reconnectOnPacketDrop) {
           this.reconnect();
           return;
@@ -79410,6 +79458,7 @@ class Session {
         }
       }
     }
+    this.packet = obj.packet;
     try { window.knOnGameMessage && window.knOnGameMessage(obj); } catch(e) {}
     this.recv(obj);
   }
@@ -79615,7 +79664,7 @@ class Session {
   }
   debug_harem_purchase() {
     if (!this.gameSession) {
-      console.log('Not in game');
+      globalThis.DEBUG_GAME_LOGS && console.log('Not in game');
       return;
     }
     const users = [];
@@ -80434,7 +80483,7 @@ class Session {
       roulette: ((_c = (_b = obj.abtest) === null || _b === void 0 ? void 0 : _b.roulette) !== null && _c !== void 0 ? _c : 0) > 0
     });
     this.abTest = Object.assign(Object.assign({}, this.abTestServer), debugABTestConfig || {});
-    console.log('abTest: ', this.abTest);
+    globalThis.DEBUG_GAME_LOGS && console.log('abTest: ', this.abTest);
     if (obj.rewarded_video_ms !== undefined) this.rewardedVideo.ts = this.serverTimer.ts(obj.rewarded_video_ms);
     if (obj.vk_quest_kisses_base !== undefined) {
       this.vkQuest = {
@@ -80612,6 +80661,7 @@ class Session {
   }
   reconnect() {
     var _a;
+    if (this.socket) this.socket.reconnecting = true;
     (_a = this.onerror) === null || _a === void 0 ? void 0 : _a.call(this, new Error('auto_reconnect'));
   }
   _recv_inactivity_shutdown(obj) {
@@ -87230,7 +87280,7 @@ const EMOJI_RE = (() => {
   try {
     return new RegExp('(\\p{RGI_Emoji})+', 'gv');
   } catch (e) {
-    console.log('EMOJI_RE v-mode is not supported');
+    globalThis.DEBUG_GAME_LOGS && console.log('EMOJI_RE v-mode is not supported');
   }
   return new RegExp(`(${javascriptraw_namespaceObject})+`, 'g');
 })();
@@ -89809,6 +89859,7 @@ class TableUserView extends PixiTransformable {
   }
   setMale(male) {}
   setPhotoUrl(photoUrl) {
+    if (this.photoUrl === photoUrl) return;
     this.photoUrl = photoUrl;
     this.updatePhoto();
   }
@@ -91894,7 +91945,7 @@ class TextureAtlas {
               page.width = texture.realWidth;
               page.height = texture.realHeight;
               if (!page.width || !page.height) {
-                console.log(`ERROR spine atlas page ${page.name}: meshes wont work if you dont specify size in atlas (http://www.html5gamedevs.com/topic/18888-pixi-spines-and-meshes/?p=107121)`);
+                globalThis.DEBUG_GAME_LOGS && console.log(`ERROR spine atlas page ${page.name}: meshes wont work if you dont specify size in atlas (http://www.html5gamedevs.com/topic/18888-pixi-spines-and-meshes/?p=107121)`);
               }
             }
             iterateParser();
@@ -92275,7 +92326,7 @@ class DebugUtils {
     for (let i = 0; i < skeleton.bones.length; i++) {
       const bone = skeleton.bones[i];
       const mat = bone.matrix;
-      console.log(`${bone.data.name}, ${mat.a}, ${mat.b}, ${mat.c}, ${mat.d}, ${mat.tx}, ${mat.ty}`);
+      globalThis.DEBUG_GAME_LOGS && console.log(`${bone.data.name}, ${mat.a}, ${mat.b}, ${mat.c}, ${mat.d}, ${mat.tx}, ${mat.ty}`);
     }
   }
 }
@@ -100012,7 +100063,7 @@ if (isSafari) {
 
 
 PIXIPatcher.patch();
-console.log('PIXI 7.3.2');
+globalThis.DEBUG_GAME_LOGS && console.log('PIXI 7.3.2');
 function userPoint(x, y) {
   let scale = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : 1;
   return {
@@ -100088,10 +100139,10 @@ class TableView {
       style.pointerEvents = 'auto';
       style.zIndex = `${TABLE_SORT.ANIMATION}`;
       (_b = view.addEventListener) === null || _b === void 0 ? void 0 : _b.call(view, 'webglcontextlost', () => {
-        console.log('webglcontextlost');
+        globalThis.DEBUG_GAME_LOGS && console.log('webglcontextlost');
       });
       (_c = view.addEventListener) === null || _c === void 0 ? void 0 : _c.call(view, 'webglcontextrestored', () => {
-        console.log('webglcontextrestored');
+        globalThis.DEBUG_GAME_LOGS && console.log('webglcontextrestored');
       });
       this.root = new pixi_js_lib.Container();
       this.root.name = 'Root';
@@ -100836,7 +100887,7 @@ class TableView {
     return text;
   }
   destroy() {
-    console.log('table2.destroy()');
+    globalThis.DEBUG_GAME_LOGS && console.log('table2.destroy()');
     if (this._invalid) throw new Error('pixi_invalid');
     for (const userView of this.users.concat()) this.destroyUser(userView);
     if (this.users.length > 0) capture_message(`Table::destroy, users=${this.users.length}`);
@@ -101253,7 +101304,7 @@ class TableView {
     if (!layout) return;
     this.el.style.backgroundImage = 'none';
     const tableSize = layout.table.width;
-    console.log('tableSize:', tableSize);
+    globalThis.DEBUG_GAME_LOGS && console.log('tableSize:', tableSize);
     if (this.isTutorial) {
       const frame = layout.unsafeFrame;
       const bgSize = Math.max(frame.width, frame.height);
@@ -102410,7 +102461,7 @@ class VKSocial {
     this.appId = this.fv.api_id;
     this.viewerId = this.fv.viewer_id;
     this.isAppleTestApp = this.appId === '7973667';
-    console.log('apiSettings:', this.apiSettings, this.apiSettingsToScopes(this.apiSettings));
+    globalThis.DEBUG_GAME_LOGS && console.log('apiSettings:', this.apiSettings, this.apiSettingsToScopes(this.apiSettings));
     this.isAddedToFavorites = sdk === 'web' ? Boolean(this.apiSettings & SCOPE_TO_MASK['left_menu']) : false;
     this.vkPlatform = VKSocial.parsePlatform(sdk, this.fv['platform']);
     this.accessToken = this.fv.access_token;
@@ -102589,7 +102640,7 @@ class VKSocial {
       }
       const response = yield this.executeInit();
       if (!((_a = response === null || response === void 0 ? void 0 : response.viewer) === null || _a === void 0 ? void 0 : _a.photo_big)) {
-        console.log(response);
+        globalThis.DEBUG_GAME_LOGS && console.log(response);
         (() => __awaiter(this, void 0, void 0, function* () {
           yield this.executeInitDo_v2();
           exception(new Error(`No photo_big v3`));
@@ -102713,9 +102764,9 @@ class VKSocial {
   }
   vkApi(method, params) {
     return __awaiter(this, void 0, void 0, function* () {
-      console.log(`vkApi.${method}:`, params);
+      if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
       const result = yield this.vkApiImpl(method, params);
-      console.log(`vkApi.${method}.result: `, JSON.stringify(result));
+      if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
       return result;
     });
   }
@@ -102915,7 +102966,7 @@ class VKSocial {
   }
   purchaseVKItem(item) {
     return __awaiter(this, void 0, void 0, function* () {
-      console.log('order:', item);
+      globalThis.DEBUG_GAME_LOGS && console.log('order:', item);
       if (this.sdk !== 'web' && this.bridge_can_showOrderBox) return yield this.bridge_showOrderBox(item);
       return yield this.web_showOrderBox(item);
     });
@@ -103111,7 +103162,7 @@ class VKSocial {
       this.showScreenshotResultDlg({
         url
       });
-      console.log('publishScreenshot:', url);
+      globalThis.DEBUG_GAME_LOGS && console.log('publishScreenshot:', url);
     });
   }
   canRequestScopes(scopes, granted) {
@@ -103133,9 +103184,9 @@ class VKSocial {
       if (!granted) {
         granted = yield this.getAppPermissions();
       }
-      console.log('requestScopes:', scopes, granted);
+      globalThis.DEBUG_GAME_LOGS && console.log('requestScopes:', scopes, granted);
       granted = yield this.requestScopesImpl(scopes, granted);
-      console.log('requestScopes-result:', granted);
+      globalThis.DEBUG_GAME_LOGS && console.log('requestScopes-result:', granted);
       return granted;
     });
   }
@@ -103172,7 +103223,7 @@ class VKSocial {
         user_id: this.viewerId
       });
       const mask = (data === null || data === void 0 ? void 0 : data.response) || 0;
-      console.log('account.getAppPermissions:', mask);
+      globalThis.DEBUG_GAME_LOGS && console.log('account.getAppPermissions:', mask);
       return this.apiSettingsToScopes(mask);
     });
   }
@@ -103245,7 +103296,7 @@ class VKSocial {
       const server = yield this.vkApi('photos.getUploadServer', {
         album_id: album.id
       });
-      console.log('photos.upload_url:', server);
+      globalThis.DEBUG_GAME_LOGS && console.log('photos.upload_url:', server);
       const upload_url = (_a = server === null || server === void 0 ? void 0 : server.response) === null || _a === void 0 ? void 0 : _a.upload_url;
       if (!upload_url) {
         this.showScreenshotResultDlg({
@@ -103254,7 +103305,7 @@ class VKSocial {
         return undefined;
       }
       const upload = yield this.uploadBlob(upload_url, screenshot);
-      console.log('photos.upload:', upload);
+      globalThis.DEBUG_GAME_LOGS && console.log('photos.upload:', upload);
       if (!upload) return undefined;
       const save = yield this.vkApi('photos.save', {
         album_id: upload.aid,
@@ -103263,7 +103314,7 @@ class VKSocial {
         hash: upload.hash,
         caption: `Скриншот из игры «Целуй и Знакомься»\n${this.domain}/spinthebottlegame`
       });
-      console.log('photos.save:', save);
+      globalThis.DEBUG_GAME_LOGS && console.log('photos.save:', save);
       const photo = (_b = save === null || save === void 0 ? void 0 : save.response) === null || _b === void 0 ? void 0 : _b[0];
       if (photo) return `https://${this.domain}/album${photo.owner_id}_${photo.album_id}`;
       this.showScreenshotResultDlg({
@@ -103510,7 +103561,7 @@ class VKSocial {
   tryPrepareNativeAd() {
     return __awaiter(this, void 0, void 0, function* () {
       if (!this.bridge_can_checkNativeAds) {
-        console.log(`No check for native ads`);
+        globalThis.DEBUG_GAME_LOGS && console.log(`No check for native ads`);
         return undefined;
       }
       const BRIDGE_AD_FORMAT = 'reward';
@@ -103540,10 +103591,10 @@ class VKSocial {
     return __awaiter(this, void 0, void 0, function* () {
       try {
         const r = yield this.bridge.send('VKWebAppAddToHomeScreen', {});
-        console.log('VKWebAppAddToHomeScreen:', r);
+        globalThis.DEBUG_GAME_LOGS && console.log('VKWebAppAddToHomeScreen:', r);
         return Boolean(r.result);
       } catch (e) {
-        console.log('VKWebAppAddToHomeScreen:', e);
+        globalThis.DEBUG_GAME_LOGS && console.log('VKWebAppAddToHomeScreen:', e);
         return false;
       }
     });
@@ -103554,10 +103605,10 @@ class VKSocial {
       if ((_a = this.bridge) === null || _a === void 0 ? void 0 : _a.supports('VKWebAppAddToHomeScreenInfo')) {
         try {
           const r = yield this.bridge.send('VKWebAppAddToHomeScreenInfo', {});
-          console.log('VKWebAppAddToHomeScreenInfo:', r);
+          globalThis.DEBUG_GAME_LOGS && console.log('VKWebAppAddToHomeScreenInfo:', r);
           return r;
         } catch (e) {
-          console.log('VKWebAppAddToHomeScreenInfo:', e);
+          globalThis.DEBUG_GAME_LOGS && console.log('VKWebAppAddToHomeScreenInfo:', e);
         }
       }
       return {
@@ -103574,10 +103625,10 @@ class VKSocial {
     return __awaiter(this, void 0, void 0, function* () {
       try {
         const r = yield this.bridge.send('VKWebAppAddToFavorites', {});
-        console.log('VKWebAppAddToFavorites:', r);
+        globalThis.DEBUG_GAME_LOGS && console.log('VKWebAppAddToFavorites:', r);
         return Boolean(r.result);
       } catch (e) {
-        console.log('VKWebAppAddToFavorites:', e);
+        globalThis.DEBUG_GAME_LOGS && console.log('VKWebAppAddToFavorites:', e);
         return false;
       }
     });
@@ -103590,10 +103641,10 @@ class VKSocial {
     return __awaiter(this, void 0, void 0, function* () {
       try {
         const data = yield this.bridge.send('VKWebAppAllowNotifications');
-        console.log('bridge_allowNotifications:', data);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_allowNotifications:', data);
         return Boolean(data.result);
       } catch (e) {
-        console.log('bridge_allowNotifications.catch:', e);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_allowNotifications.catch:', e);
         return false;
       }
     });
@@ -103627,17 +103678,17 @@ class VKSocial {
   bridge_getAuthToken(scopes) {
     return __awaiter(this, void 0, void 0, function* () {
       let data;
-      console.log('bridge_getAuthToken:', scopes);
+      globalThis.DEBUG_GAME_LOGS && console.log('bridge_getAuthToken:', scopes);
       try {
         data = yield this.bridge.send('VKWebAppGetAuthToken', {
           app_id: Number(this.appId),
           scope: scopes.join(',')
         });
-        console.log('bridge_getAuthToken.result:', JSON.stringify(data));
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_getAuthToken.result:', JSON.stringify(data));
       } catch (e) {
         const data = JSON.stringify(e);
         this.captureException(e, new Error(`vkAuthToken: ${data}`), 'info');
-        console.log('bridge_getAuthToken.catch:', data);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_getAuthToken.catch:', data);
       }
       if (!(data === null || data === void 0 ? void 0 : data.access_token)) return [];
       this.accessToken = data === null || data === void 0 ? void 0 : data.access_token;
@@ -103657,9 +103708,9 @@ class VKSocial {
         data = yield this.bridge.send('VKWebAppCheckAllowedScopes', {
           scopes: scopes.join(',')
         });
-        console.log('bridge_checkAllowedScopes:', data);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_checkAllowedScopes:', data);
       } catch (e) {
-        console.log('bridge_checkAllowedScopes.catch:', e);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_checkAllowedScopes.catch:', e);
       }
       if (!(data === null || data === void 0 ? void 0 : data.result)) return [];
       return data.result.filter(x => x.allowed).map(x => x.scope);
@@ -103675,10 +103726,10 @@ class VKSocial {
         const data = yield this.bridge.send('VKWebAppJoinGroup', {
           'group_id': group_id
         });
-        console.log('bridge_joinGroup:', data);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_joinGroup:', data);
         return data.result;
       } catch (e) {
-        console.log('bridge_joinGroup:', e);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_joinGroup:', e);
         return false;
       }
     });
@@ -103694,10 +103745,10 @@ class VKSocial {
           group_id,
           key: this.viewerId
         });
-        console.log('bridge_allowMessagesFromGroup:', data);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_allowMessagesFromGroup:', data);
         return data.result;
       } catch (e) {
-        console.log('bridge_allowMessagesFromGroup:', e);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_allowMessagesFromGroup:', e);
         return false;
       }
     });
@@ -103712,7 +103763,7 @@ class VKSocial {
         const check = yield this.bridge.send('VKWebAppCheckNativeAds', {
           ad_format
         });
-        console.log('VKWebAppCheckNativeAds:', ad_format, check);
+        globalThis.DEBUG_GAME_LOGS && console.log('VKWebAppCheckNativeAds:', ad_format, check);
         return Boolean(check.result);
       } catch (e) {
         const data = JSON.stringify(e);
@@ -103726,7 +103777,7 @@ class VKSocial {
       const data = yield this.bridge.send('VKWebAppShowNativeAds', {
         ad_format
       });
-      console.log('VKWebAppShowNativeAds:', data);
+      globalThis.DEBUG_GAME_LOGS && console.log('VKWebAppShowNativeAds:', data);
       if (!data.result) throw new Error(JSON.stringify(data));
     });
   }
@@ -103741,10 +103792,10 @@ class VKSocial {
           type: 'item',
           item
         });
-        console.log('bridge_showOrderBox:', data);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_showOrderBox:', data);
         return (data === null || data === void 0 ? void 0 : data.status) === 'success' || (data === null || data === void 0 ? void 0 : data.success);
       } catch (e) {
-        console.log('bridge_showOrderBox error:', e);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_showOrderBox error:', e);
         return false;
       }
     });
@@ -103761,10 +103812,10 @@ class VKSocial {
     return __awaiter(this, void 0, void 0, function* () {
       try {
         const result = yield this.bridge.send('VKWebAppShowInviteBox', {});
-        console.log('bridge_showInviteBox:', result);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_showInviteBox:', result);
         return true;
       } catch (e) {
-        console.log('bridge_showWallPostBox:', e);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_showWallPostBox:', e);
         return false;
       }
     });
@@ -103780,9 +103831,9 @@ class VKSocial {
           action: 'create',
           item
         });
-        console.log('bridge_showSubscriptionBox:', result);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_showSubscriptionBox:', result);
       } catch (e) {
-        console.log('bridge_showSubscriptionBox:', e);
+        globalThis.DEBUG_GAME_LOGS && console.log('bridge_showSubscriptionBox:', e);
       }
     });
   }
@@ -103797,11 +103848,11 @@ class VKSocial {
     return new Promise(resolve => {
       this.VK_addOnce({
         onAllowMessagesFromCommunity: () => {
-          console.log('web_showAllowMessagesFromCommunityBox:', 'ok');
+          globalThis.DEBUG_GAME_LOGS && console.log('web_showAllowMessagesFromCommunityBox:', 'ok');
           resolve(true);
         },
         onAllowMessagesFromCommunityCancel: () => {
-          console.log('web_showAllowMessagesFromCommunityBox:', 'cancel');
+          globalThis.DEBUG_GAME_LOGS && console.log('web_showAllowMessagesFromCommunityBox:', 'cancel');
           resolve(false);
         }
       });
@@ -103812,15 +103863,15 @@ class VKSocial {
     return new Promise(resolve => {
       this.VK_addOnce({
         onOrderSuccess: orderId => {
-          console.log('order_success:', orderId);
+          globalThis.DEBUG_GAME_LOGS && console.log('order_success:', orderId);
           resolve(true);
         },
         onOrderCancel: () => {
-          console.log('order_cancel');
+          globalThis.DEBUG_GAME_LOGS && console.log('order_cancel');
           resolve(false);
         },
         onOrderFail: errorCode => {
-          console.log('order_error:', errorCode);
+          globalThis.DEBUG_GAME_LOGS && console.log('order_error:', errorCode);
           resolve(false);
         }
       });
@@ -103836,11 +103887,11 @@ class VKSocial {
       const result = yield new Promise(resolve => {
         this.VK_addOnce({
           onSettingsChanged: settings => {
-            console.log('web_showSettingsBox:', settings, mask);
+            globalThis.DEBUG_GAME_LOGS && console.log('web_showSettingsBox:', settings, mask);
             resolve(settings);
           },
           onSettingsCancel: () => {
-            console.log('web_showSettingsBox:', 'cancel');
+            globalThis.DEBUG_GAME_LOGS && console.log('web_showSettingsBox:', 'cancel');
             resolve(0);
           }
         });
@@ -103910,7 +103961,7 @@ class MusicPresenter {
     const userPlaylistService = !isVideo ? (_a = coordinator.userPlaylistProvider) === null || _a === void 0 ? void 0 : _a.service : undefined;
     if (!service) {
       if (social instanceof VKSocial && social.isAppleVKAppAudioRestriction) return;
-      console.log(`Social: ${social.id}, Platform: ${social.platformId}, isVideo: ${isVideo}`);
+      globalThis.DEBUG_GAME_LOGS && console.log(`Social: ${social.id}, Platform: ${social.platformId}, isVideo: ${isVideo}`);
       exception(new Error(`No ${isVideo ? 'video' : 'audio'} provider available`));
       return;
     }
@@ -106248,6 +106299,40 @@ class GiftAnimations {
   constructor(animationManager, tablePresenter) {
     this.animationManager = animationManager;
     this.tablePresenter = tablePresenter;
+    this.activeGiftAnimations = 0;
+    this.pendingGiftAnimations = [];
+    this.timelines = new Set();
+    this.flights = new Map();
+    this.destroyed = false;
+  }
+  createTimeline(onDestroy) {
+    const tl = this.animationManager.timeline();
+    this.timelines.add(tl);
+    let ended = false;
+    tl.ondestroy = () => {
+      if (ended) return;
+      ended = true;
+      this.timelines.delete(tl);
+      if (onDestroy) onDestroy();
+    };
+    return tl;
+  }
+  discardGiftView(view) { if (view) this.tableView.destroyGift(view); }
+  validGift(s, r, gift) {
+    return !this.destroyed && s && r && s.id != null && r.id != null && s.game && r.game &&
+      gift && typeof gift === 'object' && ['ava', 'drink', 'hat'].includes(gift.stickPoint) &&
+      this.getUserView(s.id) && this.getUserView(r.id);
+  }
+  destroy() {
+    this.destroyed = true;
+    for (const args of this.pendingGiftAnimations.splice(0)) this.discardGiftView(args[3]);
+    for (const tl of [...this.timelines]) tl.complete();
+  }
+  drainGifts() {
+    if (this.destroyed) return;
+    while (this.activeGiftAnimations < 4 && this.pendingGiftAnimations.length) {
+      this.flyGift(...this.pendingGiftAnimations.shift());
+    }
   }
   get tableView() {
     return this.tablePresenter.tableView;
@@ -106281,6 +106366,7 @@ class GiftAnimations {
   addViewerGold(gold) {
     let goldReal = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : 0;
     let pt = arguments.length > 2 ? arguments[2] : undefined;
+    const alreadyApplied = arguments[3] === true;
     var _a;
     pt = pt ? this.tableView.globalToAnimationLayer(pt) : {
       x: 0,
@@ -106291,14 +106377,14 @@ class GiftAnimations {
     heartIcon.y = pt.y;
     (_a = this.playSfx) === null || _a === void 0 ? void 0 : _a.call(this, 'drop');
     const m = this.animationManager;
-    const tl = m.timeline();
+    const tl = this.createTimeline();
     tl.ease = m.EASE_OUT;
     tl.add(0, m.tween(heartIcon, 2, this.tableView.btnHeart.centerPoint));
     tl.add(2, m.tween(heartIcon, 0.3, {
       alpha: 0
     }));
     tl.add(2.3, () => {
-      this.viewer.viewer.incCurrency('gold', gold, goldReal);
+      if (!alreadyApplied) this.viewer.viewer.incCurrency('gold', gold, goldReal);
       this.tableView.destroyCurrencyIcon(heartIcon);
       this.tableView.playGoldIncreasedAnimation();
     });
@@ -106327,7 +106413,7 @@ class GiftAnimations {
     tokensIcon.y = pt.y;
     (_a = this.playSfx) === null || _a === void 0 ? void 0 : _a.call(this, 'drop');
     const m = this.animationManager;
-    const tl = m.timeline();
+    const tl = this.createTimeline();
     tl.ease = m.EASE_OUT;
     tl.add(0, m.tween(tokensIcon, 2, to));
     tl.add(2, m.tween(tokensIcon, 0.3, {
@@ -106352,7 +106438,7 @@ class GiftAnimations {
     chanceIcon.y = pt.y;
     (_a = this.playSfx) === null || _a === void 0 ? void 0 : _a.call(this, 'drop');
     const m = this.animationManager;
-    const tl = m.timeline();
+    const tl = this.createTimeline();
     tl.ease = m.EASE_OUT;
     tl.add(0, m.tween(chanceIcon, 2, this.tableView.btnRoulette.centerPoint));
     tl.add(2, m.tween(chanceIcon, 0.3, {
@@ -106375,7 +106461,7 @@ class GiftAnimations {
     heartView.x = pt.x;
     heartView.y = pt.y;
     const m = this.animationManager;
-    const tl = m.timeline();
+    const tl = this.createTimeline();
     tl.ease = m.EASE_OUT;
     tl.add(0, m.tween(heartView, 2, {
       x: pt.x,
@@ -106384,24 +106470,26 @@ class GiftAnimations {
     }));
     tl.add(2, () => this.tableView.destroyCurrencyIcon(heartView));
   }
-  flyGift(s, r, gift, giftView) {
+  applyGiftState(r, gift) {
+    if (Number.isFinite(gift.kiss) && r.game && typeof r.game.kiss === 'function') r.game.kiss(gift.kiss);
+    if (Number.isSafeInteger(gift.drinkCount) && gift.drinkCount >= 0 && r.game) r.game.drinkCount = gift.drinkCount;
+    if (Number.isFinite(gift.gold) && gift.gold > 0 && r.viewer && typeof r.viewer.incCurrency === 'function') {
+      r.viewer.incCurrency('gold', gift.gold, 0);
+    }
+  }
+  flyGift(s, r, gift, giftView, stateApplied = false) {
     var _a;
-    if ((this.activeGiftAnimations || 0) >= 50) {
-      if (!this.pendingGiftAnimations) this.pendingGiftAnimations = [];
-      if (this.pendingGiftAnimations.length < 80) this.pendingGiftAnimations.push([s, r, gift, giftView]);
+    if (!this.validGift(s, r, gift)) { this.discardGiftView(giftView); return; }
+    if (!stateApplied) this.applyGiftState(r, gift);
+    if (this.activeGiftAnimations >= 4) {
+      if (this.pendingGiftAnimations.length < 24) this.pendingGiftAnimations.push([s, r, gift, giftView, true]);
+      else this.discardGiftView(giftView);
       return;
     }
-    this.activeGiftAnimations = (this.activeGiftAnimations || 0) + 1;
-    window.setTimeout(() => {
-      this.activeGiftAnimations = Math.max(0, (this.activeGiftAnimations || 1) - 1);
-      if (this.pendingGiftAnimations && this.pendingGiftAnimations.length > 0) {
-        const nextArgs = this.pendingGiftAnimations.shift();
-        this.flyGift(nextArgs[0], nextArgs[1], nextArgs[2], nextArgs[3]);
-      }
-    }, 5300);
-    if (!this.calcGiftPosition(r, gift)) return;
+    if (!this.calcGiftPosition(r, gift)) { this.discardGiftView(giftView); return; }
     const sv = this.getUserView(s.id);
-    if (!sv) return;
+    let flyView, tl, handedOff = false;
+    try {
     const src = this.userToLayer(sv, {
       x: 0,
       y: 0,
@@ -106410,7 +106498,7 @@ class GiftAnimations {
       rotation: 0,
       layer: 'ava'
     });
-    const flyView = giftView || this.tableView.createGift({
+    flyView = giftView || this.tableView.createGift({
       image: gift.flyImage,
       spine: gift.spine,
       stick: false,
@@ -106423,12 +106511,18 @@ class GiftAnimations {
     this.onFly(r, gift);
     (_a = this.playSfx) === null || _a === void 0 ? void 0 : _a.call(this, gift.startSound);
     const m = this.animationManager;
-    const tl = m.timeline();
+    tl = this.createTimeline(() => {
+      this.activeGiftAnimations--;
+      this.flights.delete(tl);
+      if (!handedOff) this.discardGiftView(flyView);
+      Promise.resolve().then(() => this.drainGifts());
+    });
+    this.activeGiftAnimations++;
+    this.flights.set(tl, { sender: s.id, receiver: r.id });
     tl.ease = m.EASE_OUT;
     tl.add(0, m.tweenf(5, p => {
       if (!r.game) {
         tl.complete();
-        this.tableView.destroyGift(flyView);
         return;
       }
       const rv = this.getUserView(r.id);
@@ -106454,7 +106548,7 @@ class GiftAnimations {
       return 1;
     }));
     const finishSec = (() => {
-      if (this.tableView.caps.spine && gift.spine) return gift.spineFinishSec || 5;
+      if (this.tableView.caps.spine && gift.spine && Number.isFinite(gift.spineFinishSec)) return Math.max(0, Math.min(30, gift.spineFinishSec));
       return 5;
     })();
     tl.add(finishSec, () => {
@@ -106467,24 +106561,24 @@ class GiftAnimations {
     tl.add(5, () => {
       const stickView = this.stickGift(r, gift, flyView, s);
       if (!stickView) return;
-      if (gift.kiss) {
-        if (!r.game) throw new Error(`Not in game ${r.toString()} ${s.toString()} ${gift.toString()} ${new Date().toString()} ${m.numTweens}`);
-        r.game.kiss(gift.kiss);
-      }
-      if (gift.drinkCount !== undefined && r.game) r.game.drinkCount = gift.drinkCount;
+      handedOff = true;
       if (gift.gold) {
         if (r.viewer) {
-          this.addViewerGold(gift.gold, 0, stickView.dropPoint);
+          this.addViewerGold(gift.gold, 0, stickView.dropPoint, true);
         } else {
           this.inplaceGold(stickView.dropPoint);
         }
       }
     });
+    } catch (_) {
+      if (tl) tl.complete();
+      else this.discardGiftView(flyView || giftView);
+    }
   }
   stickGift(r, gift, flyView, s) {
     var _a;
     const isEnterGift = !flyView;
-    if (!r.game) return undefined;
+    if (this.destroyed || !r || !r.game || !gift) return undefined;
     const rv = this.getUserView(r.id);
     if (!rv) return undefined;
     const stickPt = this.calcGiftPosition(r, gift);
@@ -106520,9 +106614,11 @@ class GiftAnimations {
     };
   }
   calcGiftPosition(user, gift) {
+    if (!user || user.id == null || !gift || typeof gift !== 'object') return undefined;
     const userView = this.getUserView(user.id);
     if (!userView) return undefined;
     const photoFrame = userView.photoFrame;
+    if (!photoFrame) return undefined;
     const calcAva = () => {
       const r = random(gift.random);
       const r1 = r();
@@ -106570,6 +106666,13 @@ class GiftAnimations {
     return undefined;
   }
   leaveUser(u) {
+    this.pendingGiftAnimations = this.pendingGiftAnimations.filter(args => {
+      if (args[0].id !== u.id && args[1].id !== u.id) return true;
+      this.discardGiftView(args[3]); return false;
+    });
+    for (const [tl, flight] of this.flights) {
+      if (flight.sender === u.id || flight.receiver === u.id) tl.complete();
+    }
     const p = this.getUserPresenter(u.id);
     if (!p) return;
     for (const giftStick of p.sticks) this.tableView.destroyGift(giftStick.view);
@@ -106606,16 +106709,22 @@ class GiftAnimations {
     const a = (_a = this.getUserPresenter(r.id)) === null || _a === void 0 ? void 0 : _a.sticks;
     if (!a) return;
     const m = this.animationManager;
-    const t = m.timeline();
+    const fadingViews = new Set();
+    const t = this.createTimeline(() => {
+      for (const view of fadingViews) this.discardGiftView(view);
+      fadingViews.clear();
+    });
     for (let i = a.length - 1; i >= 0; i--) {
       const gift = a[i].gift;
       const view = a[i].view;
       if (gift.stickPoint !== stickPoint) continue;
       a.splice(i, 1);
+      fadingViews.add(view);
       t.add(delay, m.tween(view, duration, {
         alpha: 0
       }));
       t.add(delay + duration, () => {
+        fadingViews.delete(view);
         this.tableView.destroyGift(view);
       });
     }
@@ -106833,6 +106942,7 @@ class TablePresenter {
     }
   }
   destroy() {
+    this.giftAnimations.destroy();
     for (const id in this.user2presenter) {
       const p = this.user2presenter[id];
       this.leaveUser(p.user);
@@ -108332,12 +108442,12 @@ class BankPresenter {
             const sfxPrevValue = root.sfxManager.enabled;
             root.sfxManager.enabled = false;
             try {
-              console.log('rewardedVideo: started');
+              globalThis.DEBUG_GAME_LOGS && console.log('rewardedVideo: started');
               yield rv.show();
-              console.log('rewardedVideo: finished');
+              globalThis.DEBUG_GAME_LOGS && console.log('rewardedVideo: finished');
               session.claimRewardedVideoBonus();
             } catch (e) {
-              console.log('rewardedVideo:', e);
+              globalThis.DEBUG_GAME_LOGS && console.log('rewardedVideo:', e);
               const err = e instanceof Error ? 'notError: ' + e : JSON.stringify(e);
               session.rewardedVideoError(err);
             }
@@ -109481,7 +109591,7 @@ class ChangeTablePresenter {
         this.ctx.session.gotoInterstitial();
         yield this.ctx.social.showInterstitialVideo();
       } catch (e) {
-        console.log('Interstitial Video:', e);
+        globalThis.DEBUG_GAME_LOGS && console.log('Interstitial Video:', e);
       }
     });
   }
@@ -110719,7 +110829,7 @@ function index_esm2017_areCookiesEnabled() {
  *   catch (e) {
  *     assert(e.message === "Could not find file: foo.txt.");
  *     if ((e as FirebaseError)?.code === 'service/file-not-found') {
- *       console.log("Could not read file: " + e['file']);
+ *       globalThis.DEBUG_GAME_LOGS && console.log("Could not read file: " + e['file']);
  *     }
  *   }
  */
@@ -113294,10 +113404,10 @@ function getApps() {
  * ```javascript
  * deleteApp(app)
  *   .then(function() {
- *     console.log("App deleted successfully");
+ *     globalThis.DEBUG_GAME_LOGS && console.log("App deleted successfully");
  *   })
  *   .catch(function(error) {
- *     console.log("Error deleting app:", error);
+ *     globalThis.DEBUG_GAME_LOGS && console.log("Error deleting app:", error);
  *   });
  * ```
  *
@@ -117432,7 +117542,7 @@ class PurchaseOption {
           productID: this.product.productID
         });
       } catch (e) {
-        console.log(e);
+        globalThis.DEBUG_GAME_LOGS && console.log(e);
         return;
       }
       yield this.social.claimFbPurchase(p.signedRequest);
@@ -117519,7 +117629,7 @@ class FBIGSocial {
         },
         complete: () => {}
       };
-      FBInstant.onPause(() => console.log('paused'));
+      FBInstant.onPause(() => globalThis.DEBUG_GAME_LOGS && console.log('paused'));
       if (FBInstant.getSupportedAPIs().indexOf('payments.purchaseAsync') !== -1 && this.platform !== 'IOS') {
         try {
           FBInstant.payments.onReady(() => this.initPayments());
@@ -117604,7 +117714,7 @@ class FBIGSocial {
         this.ontogglebothint && this.ontogglebothint(false);
         return true;
       } catch (e) {
-        console.log(e);
+        globalThis.DEBUG_GAME_LOGS && console.log(e);
         this.session && this.session.trackEvent('viral', 'not_created', 'shortcut');
         this.ontogglebothint && this.ontogglebothint(false);
         return false;
@@ -117616,7 +117726,7 @@ class FBIGSocial {
       try {
         return yield FBInstant.player.canSubscribeBotAsync();
       } catch (e) {
-        console.log(e);
+        globalThis.DEBUG_GAME_LOGS && console.log(e);
         return false;
       }
     });
@@ -117632,7 +117742,7 @@ class FBIGSocial {
       this.ontogglebothint && this.ontogglebothint(false);
       return true;
     }).catch(e => {
-      console.log(e);
+      globalThis.DEBUG_GAME_LOGS && console.log(e);
       this.logEvent('stb_igbot', 0, {
         cohort: source,
         result: e.code
@@ -117667,7 +117777,7 @@ class FBIGSocial {
             productID: 'http://s3.amazonaws.com/s3.ciliz.ru/bottle/fbog/products_20211126/bottle-pass.html'
           });
         } catch (e) {
-          console.log(e);
+          globalThis.DEBUG_GAME_LOGS && console.log(e);
           return;
         }
         yield this.claimFbPurchase(p.signedRequest);
@@ -117710,7 +117820,7 @@ class FBIGSocial {
       try {
         return yield this.inviteFriendsImpl(text);
       } catch (error) {
-        console.log('error:', error);
+        globalThis.DEBUG_GAME_LOGS && console.log('error:', error);
         return false;
       }
     });
@@ -117735,7 +117845,7 @@ class FBIGSocial {
       };
       this.session && this.session.trackEvent('viral', 'share_async', 'invite');
       yield FBInstant.updateAsync(data);
-      console.log('shared:', data);
+      globalThis.DEBUG_GAME_LOGS && console.log('shared:', data);
       return true;
     });
   }
@@ -117766,10 +117876,10 @@ class FBIGSocial {
       };
       try {
         yield FBInstant.shareAsync(data);
-        console.log('shared:', data);
+        globalThis.DEBUG_GAME_LOGS && console.log('shared:', data);
         return true;
       } catch (error) {
-        console.log('error:', error);
+        globalThis.DEBUG_GAME_LOGS && console.log('error:', error);
         return false;
       }
     });
@@ -118448,7 +118558,7 @@ class FeedbackPresenter {
       confirmAction: {
         title: trans.translate('dlg:delete_account:btn_cancel'),
         onclick: pt => {
-          console.log('cancel', pt);
+          globalThis.DEBUG_GAME_LOGS && console.log('cancel', pt);
           dlg.close();
         }
       }
@@ -121818,7 +121928,7 @@ class UserProfilePresenter {
           }
         } : undefined;
       };
-      console.log('KICKOUT-DEBUG abTest=' + JSON.stringify(session.abTest) + ' user.game=' + Boolean(user.game) + ' result=' + JSON.stringify(getKickoutBtn()));
+      globalThis.DEBUG_GAME_LOGS && console.log('KICKOUT-DEBUG abTest=' + JSON.stringify(session.abTest) + ' user.game=' + Boolean(user.game) + ' result=' + JSON.stringify(getKickoutBtn()));
       dlgParams.kickout = getKickoutBtn();
       dlg.setParams(dlgParams);
       (() => __awaiter(this, void 0, void 0, function* () {
@@ -121894,7 +122004,7 @@ class UserProfilePresenter {
           socialId: profile.social,
           userId: user.id
         });
-        console.log(`getProfileUrl: ${href}`);
+        globalThis.DEBUG_GAME_LOGS && console.log(`getProfileUrl: ${href}`);
         dlgParams.social = {
           id: profile.social,
           href,
@@ -136136,7 +136246,7 @@ class ImageLoader {
           const type = isRIFF ? 'webp' : 'png';
           return `data:image/${type};base64,${base64}`;
         }, e => {
-          console.log('ab blocked:', e);
+          globalThis.DEBUG_GAME_LOGS && console.log('ab blocked:', e);
           return '';
         });
       }
@@ -138287,16 +138397,16 @@ class FBSocial {
     FB.api('/me', {
       fields: 'payment_mobile_pricepoints,permissions'
     }, me => {
-      console.log('/me:', me);
+      globalThis.DEBUG_GAME_LOGS && console.log('/me:', me);
       this.me = me;
     });
     this.getFriendsPage();
     FB.api('/me/apprequests', response => {
-      console.log('/me/apprequests:', response);
+      globalThis.DEBUG_GAME_LOGS && console.log('/me/apprequests:', response);
       const ids = (response.data || []).map(i => i.id);
       for (const id of ids) {
         FB.api(id, 'delete', {}, delRes => {
-          console.log(`DELETE ${id} result = ${JSON.stringify(delRes)}`);
+          globalThis.DEBUG_GAME_LOGS && console.log(`DELETE ${id} result = ${JSON.stringify(delRes)}`);
         });
       }
     });
@@ -138305,11 +138415,11 @@ class FBSocial {
     const apiUrl = url || '/me/friends';
     FB.api(apiUrl, response => {
       var _a;
-      console.log(`${apiUrl}:`, JSON.stringify(response));
+      globalThis.DEBUG_GAME_LOGS && console.log(`${apiUrl}:`, JSON.stringify(response));
       this.friendIds.push(...(response.data || []).map(i => i.id));
-      console.log(`friends: ${JSON.stringify(this.friendIds)}`);
+      globalThis.DEBUG_GAME_LOGS && console.log(`friends: ${JSON.stringify(this.friendIds)}`);
       if ((_a = response === null || response === void 0 ? void 0 : response.paging) === null || _a === void 0 ? void 0 : _a.next) {
-        console.log(`${apiUrl}: ${JSON.stringify(response.paging.next)}`);
+        globalThis.DEBUG_GAME_LOGS && console.log(`${apiUrl}: ${JSON.stringify(response.paging.next)}`);
         const nextUrl = response.paging.next.split(sdkVersion)[1];
         this.getFriendsPage(nextUrl);
       }
@@ -138382,7 +138492,7 @@ class FBSocial {
           action: 'purchaseitem',
           product: `${OG_PRODUCTS_BASE}${currency}-X1-${o.real}.html`
         }, data => {
-          console.log('purchaseOptions:', data);
+          globalThis.DEBUG_GAME_LOGS && console.log('purchaseOptions:', data);
         });
       }
     }));
@@ -138401,7 +138511,7 @@ class FBSocial {
           action: 'purchaseitem',
           product: `${OG_PRODUCTS_BASE}${currency}-welcome-1.html`
         }, data => {
-          console.log('welcomeOffer:', data);
+          globalThis.DEBUG_GAME_LOGS && console.log('welcomeOffer:', data);
         });
       }
     };
@@ -138421,7 +138531,7 @@ class FBSocial {
           action: 'create_subscription',
           product: `${OG_PRODUCTS_BASE}VIP-week.html`
         }, data => {
-          console.log('vipOptions:', data);
+          globalThis.DEBUG_GAME_LOGS && console.log('vipOptions:', data);
         });
       }
     }, {
@@ -138435,7 +138545,7 @@ class FBSocial {
           action: 'create_subscription',
           product: `${OG_PRODUCTS_BASE}VIP-month.html`
         }, data => {
-          console.log('vipOptions:', data);
+          globalThis.DEBUG_GAME_LOGS && console.log('vipOptions:', data);
         });
       }
     }];
@@ -138452,7 +138562,7 @@ class FBSocial {
           action: 'purchaseitem',
           product: 'http://s3.amazonaws.com/s3.ciliz.ru/bottle/fbog/products_20211126/bottle-pass.html'
         }, data => {
-          console.log('purchaseOptions:', data);
+          globalThis.DEBUG_GAME_LOGS && console.log('purchaseOptions:', data);
         });
       }
     };
@@ -138467,7 +138577,7 @@ class FBSocial {
           filters: ['app_non_users'],
           data: `invite_${reason}`
         }, data => {
-          console.log('invite:', data);
+          globalThis.DEBUG_GAME_LOGS && console.log('invite:', data);
           resolve(true);
         });
       })
@@ -138545,10 +138655,10 @@ class YASocial {
       let forceAuth = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : false;
       return function* () {
         var _a, _b, _c;
-        console.log('YASocial.load');
+        globalThis.DEBUG_GAME_LOGS && console.log('YASocial.load');
         let player = yield _this.getPlayer();
         if (!player.isAuthorized()) {
-          console.log('YASocial.load.lite');
+          globalThis.DEBUG_GAME_LOGS && console.log('YASocial.load.lite');
           if (!forceAuth) return;
           while (!player.isAuthorized()) {
             try {
@@ -138560,7 +138670,7 @@ class YASocial {
             player = yield _this.getPlayer();
           }
         }
-        console.log('YASocial.load.player:', JSON.stringify(player));
+        globalThis.DEBUG_GAME_LOGS && console.log('YASocial.load.player:', JSON.stringify(player));
         const scope = (_c = (_b = player._personalInfo) === null || _b === void 0 ? void 0 : _b.scopePermissions) === null || _c === void 0 ? void 0 : _c.public_name;
         const publicName = player.getName();
         if (!scope) {
@@ -138603,10 +138713,10 @@ class YASocial {
       });
       if (!payments) return;
       const purchases = yield payments.getPurchases();
-      console.log('YASocial.purchases:', purchases === null || purchases === void 0 ? void 0 : purchases.length, purchases);
+      globalThis.DEBUG_GAME_LOGS && console.log('YASocial.purchases:', purchases === null || purchases === void 0 ? void 0 : purchases.length, purchases);
       if (!this.session) return;
       const tokens = yield this.session.claimYaPurchases(purchases.signature);
-      console.log('YASocial.tokens:', tokens);
+      globalThis.DEBUG_GAME_LOGS && console.log('YASocial.tokens:', tokens);
       for (const t of tokens) {
         payments.consumePurchase(t);
       }
@@ -138667,14 +138777,14 @@ class YASocial {
         console.error(e);
         return;
       }
-      console.log('YASocial.purchase:', p);
+      globalThis.DEBUG_GAME_LOGS && console.log('YASocial.purchase:', p);
       const purchases = yield payments.getPurchases();
-      console.log('YASocial.purchases:', purchases === null || purchases === void 0 ? void 0 : purchases.length, purchases);
+      globalThis.DEBUG_GAME_LOGS && console.log('YASocial.purchases:', purchases === null || purchases === void 0 ? void 0 : purchases.length, purchases);
       if ((purchases === null || purchases === void 0 ? void 0 : purchases.length) !== 1) {
         exception(new Error(`Incorrect purchase number: ${purchases === null || purchases === void 0 ? void 0 : purchases.length}`));
       }
       const tokens = yield this.session.claimYaPurchases(p.signature);
-      console.log('YASocial.tokens', tokens);
+      globalThis.DEBUG_GAME_LOGS && console.log('YASocial.tokens', tokens);
       for (const t of tokens) {
         payments.consumePurchase(t);
       }
@@ -138879,7 +138989,7 @@ function main(env, factory, social, config, registrationInfo, registrationPhoto)
     trans.nameEnumerator = name => [`${social.id}:${name}`, name];
     factory.trans = trans;
     factory.showLoadingView(locale, social.ageLimit);
-    console.log('SOCKET-FACTORY-LOOKUP id=' + social.id); const socketFactory = env.socketFactories[social.id]; console.log('SOCKET-FACTORY-FOUND=' + (socketFactory ? 'YES' : 'NO'));
+    globalThis.DEBUG_GAME_LOGS && console.log('SOCKET-FACTORY-LOOKUP id=' + social.id); const socketFactory = env.socketFactories[social.id]; globalThis.DEBUG_GAME_LOGS && console.log('SOCKET-FACTORY-FOUND=' + (socketFactory ? 'YES' : 'NO'));
     const socket = socketFactory();
     socket.onrecvcomplete = () => env.root.update();
     const s = new Session(socket, env.root.timer);
@@ -139056,7 +139166,7 @@ function main(env, factory, social, config, registrationInfo, registrationPhoto)
       social.setSession(undefined, undefined);
     };
     social.onlogout = () => {
-      console.log('social.onlogout');
+      globalThis.DEBUG_GAME_LOGS && console.log('social.onlogout');
       if (s.isDestroyed) {
         env.root.dialogManager.closeAll();
       } else {
@@ -139402,7 +139512,7 @@ class AdjustCore {
         if (!ids.adid && !ids.idfa) return;
         session.setAdjust(ids);
       } catch (e) {
-        console.log('adjust.trackingIds failed:', e);
+        globalThis.DEBUG_GAME_LOGS && console.log('adjust.trackingIds failed:', e);
       }
     });
   }
@@ -139449,7 +139559,7 @@ const transport = new class {
     adjust_latest_default().trackEvent({
       eventToken,
       callbackParams: this.toCallbackParams(params)
-    }).catch(e => console.log('adjust.trackEvent failed:', e));
+    }).catch(e => globalThis.DEBUG_GAME_LOGS && console.log('adjust.trackEvent failed:', e));
   }
   toCallbackParams(params) {
     return Object.keys(params).filter(key => params[key] !== '').map(key => ({
@@ -139482,12 +139592,12 @@ class JSONSocket {
     if (this.socket) throw new Error('Already opened');
     const prefix = this.secure ? 'wss' : 'ws';
     const url = this.server.indexOf('wss:') === 0 ? this.server : this.port ? `${prefix}://${this.server}:${this.port}` : `${prefix}://${this.server}/ws/`;
-    console.log(`open: ${url}`);
+    globalThis.DEBUG_GAME_LOGS && console.log(`open: ${url}`);
     this.socket = new WebSocket(url, 'binary');
     this.socket.binaryType = 'arraybuffer';
     this.socket.onopen = e => {
       var _a;
-      console.log(`socket.open: `, e);
+      globalThis.DEBUG_GAME_LOGS && console.log(`socket.open: `, e);
       (_a = this.onopen) === null || _a === void 0 ? void 0 : _a.call(this, e);
     };
     this.socket.onmessage = e => {
@@ -139497,7 +139607,7 @@ class JSONSocket {
       const data = String.fromCharCode.apply(null, arr);
       const utf8s = data.substr(2);
       const jsonData = decodeURIComponent(escape(utf8s));
-      console.log(`recv: ${jsonData}`);
+      if (window.DEBUG_GAME_LOGS) console.debug('WS recv bytes:', arr.length);
       const json = JSON.parse(jsonData);
       if (json.type === 'game_enter' && !window.__tableUrlHandled) {
         window.__tableUrlHandled = true;
@@ -139514,12 +139624,12 @@ class JSONSocket {
     };
     this.socket.onerror = e => {
       var _a;
-      console.log(`socket.error: `, e);
+      globalThis.DEBUG_GAME_LOGS && console.log(`socket.error: `, e);
       (_a = this.onerror) === null || _a === void 0 ? void 0 : _a.call(this, e);
     };
     this.socket.onclose = e => {
       var _a;
-      console.log(`socket.close: `, e);
+      globalThis.DEBUG_GAME_LOGS && console.log(`socket.close: `, e);
       (_a = this.onclose) === null || _a === void 0 ? void 0 : _a.call(this, e);
     };
   }
@@ -139530,7 +139640,7 @@ class JSONSocket {
   }
   sendString(json) {
     if (!this.socket) throw new Error('No open socket');
-    console.log(`send: ${json}`);
+    if (window.DEBUG_GAME_LOGS) console.debug('WS send bytes:', json.length);
     const utf8s = unescape(encodeURIComponent(json));
     const a = Math.floor(utf8s.length / 256);
     const b = utf8s.length % 256;
@@ -139541,7 +139651,8 @@ class JSONSocket {
   }
   close() {
     if (!this.socket) throw new Error('No open socket');
-    this.socket.close();
+    if (this.reconnecting) this.socket.close(4002, 'state_resync');
+    else this.socket.close(1000);
   }
 }
 ;// ./js/presenters/SfxPresenter.ts
@@ -140033,22 +140144,38 @@ class PhotoLoader {
     this.timeout = null;
     this.defaultPhotoFallbackTimeout = 10000;
     this.successfullyLoaded = {};
+    this.photoRequests = new Map();
+    this.photoCache = new Map();
+    this.backgroundRequests = new WeakMap();
+    this.imageRequests = new Map();
   }
   load(url) {
     return __awaiter(this, void 0, void 0, function* () {
-      const result = yield this.tryLoadFromUrls(url, 'PhotoLoader.load');
-      if (result) return result.img;
-      return yield this.safeLoadIMG_HTML(ui_default_photoinline_namespaceObject);
+      const key = this.fixOrFallbackToDefault(url);
+      if (this.photoCache.has(key)) return this.photoCache.get(key).cloneNode(true);
+      let request = this.photoRequests.get(key);
+      if (!request) {
+        request = this.tryLoadFromUrls(key, 'PhotoLoader.load').then(result => {
+          return result ? result.img : this.safeLoadIMG_HTML(ui_default_photoinline_namespaceObject);
+        }).then(img => {
+          if (this.photoCache.size >= 256) this.photoCache.delete(this.photoCache.keys().next().value);
+          this.photoCache.set(key, img);
+          return img;
+        }).finally(() => this.photoRequests.delete(key));
+        this.photoRequests.set(key, request);
+      }
+      return (yield request).cloneNode(true);
+
     });
   }
   loadDefaultPhoto() {
     return __awaiter(this, void 0, void 0, function* () {
-      return yield this.safeLoadIMG_HTML(ui_default_photoinline_namespaceObject);
+      return yield this.load(ui_default_photoinline_namespaceObject);
     });
   }
   loadIgnorePhoto() {
     return __awaiter(this, void 0, void 0, function* () {
-      return yield this.safeLoadIMG_HTML(ui_ignore_photoinline_namespaceObject);
+      return yield this.load(ui_ignore_photoinline_namespaceObject);
     });
   }
   safeLoadIMG_HTML(url) {
@@ -140079,26 +140206,20 @@ class PhotoLoader {
   tryLoadBG(el, url) {
     return __awaiter(this, void 0, void 0, function* () {
       url = this.fixOrFallbackToDefault(url);
+      if (this.backgroundRequests.get(el)?.url === url) return this.backgroundRequests.get(el).promise;
       el.style.backgroundColor = '#dde8ed';
       el.style.backgroundImage = `url(${url})`;
       yield this.fallbackLoadBG(el, url);
     });
   }
   fallbackLoadBG(el, url) {
-    return __awaiter(this, void 0, void 0, function* () {
-      let result = null;
-      const loadPromise = this.tryLoadFromUrls(url, 'PhotoLoader.fallbackLoadBG');
-      delay(this.defaultPhotoFallbackTimeout).then(() => {
-        if (result) return;
-        el.style.backgroundImage = `url(${ui_default_photoinline_namespaceObject})`;
-      });
-      result = yield loadPromise;
-      if (!result) {
-        el.style.backgroundImage = `url(${ui_default_photoinline_namespaceObject})`;
-        return;
-      }
-      el.style.backgroundImage = `url(${result.loadedUrl})`;
+    if (this.backgroundRequests.get(el)?.url === url) return this.backgroundRequests.get(el).promise;
+    const state = { url, promise: null };
+    this.backgroundRequests.set(el, state);
+    state.promise = this.load(url).then(img => {
+      if (this.backgroundRequests.get(el) === state) el.style.backgroundImage = `url(${img.src})`;
     });
+    return state.promise;
   }
   tryLoadFromUrls(url, errorContext) {
     return __awaiter(this, void 0, void 0, function* () {
@@ -140223,17 +140344,22 @@ class PhotoLoader {
     });
   }
   loadIMG_HTML(url) {
-    return new Promise((resolve, reject) => {
+    if (this.imageRequests.has(url)) return this.imageRequests.get(url).then(img => img.cloneNode(true));
+    const request = new Promise((resolve, reject) => {
       const imgEl = document.createElement('img');
       imgEl.crossOrigin = this.crossOrigin;
-      imgEl.onload = () => resolve(imgEl);
+      const timer = setTimeout(() => { imgEl.onload = imgEl.onerror = null; imgEl.src = ''; reject(new Error('photo_timeout')); }, this.timeout || 10000);
+      imgEl.onload = () => { clearTimeout(timer); resolve(imgEl); };
       imgEl.onerror = e => {
+        clearTimeout(timer);
         imgEl.onerror = null;
         console.error(`Failed to photo loadIMG_HTML ${url}`);
         reject(new Error(`Failed to load photo`));
       };
       imgEl.src = url;
-    });
+    }).finally(() => this.imageRequests.delete(url));
+    this.imageRequests.set(url, request);
+    return request.then(img => img.cloneNode(true));
   }
   fixOrFallbackToDefault(url) {
     if (!url) return ui_default_photoinline_namespaceObject;
@@ -140310,7 +140436,7 @@ function SfxAudioPlayer_HTMLAudioElement_safePlay(audio) {
     audio.pause();
   }
   const promise = audio.play();
-  if (promise) promise.catch(e => console.log('HTMLAudioPlayer.safePlayAudio', e));
+  if (promise) promise.catch(e => globalThis.DEBUG_GAME_LOGS && console.log('HTMLAudioPlayer.safePlayAudio', e));
 }
 class SfxAudioPlayer {
   constructor(url, volume) {
@@ -141078,13 +141204,13 @@ class Root {
     this.prevSkip = 0;
     htmlRoot.classList.add('bottle');
     try {
-      const __ro = new ResizeObserver(entries => {
+      this.resizeObserver = new ResizeObserver(entries => {
         for (const entry of entries) {
           const cr = entry.contentRect;
           if (this.root && (this.root.width !== cr.width || this.root.height !== cr.height)) this.updateLayout();
         }
       });
-      __ro.observe(htmlRoot);
+      this.resizeObserver.observe(htmlRoot);
     } catch (roErr) {}
     this.updateOrientation();
     this.root = new Group();
@@ -141106,7 +141232,11 @@ class Root {
     document.addEventListener('touchstart', this.onUserAction, passiveOps(true));
     document.addEventListener('touchend', this.onUserAction, true);
     document.addEventListener('click', this.onUserAction, true);
-    document.addEventListener('click', function(e) { var t = e.target && e.target.closest ? e.target.closest('[class*=player-controls__mute]') : null; if (t) { window.__wantMusicMuted = !window.__wantMusicMuted; window.dispatchEvent(new Event('musicMuteToggled')); } }, true);
+    this.onMusicMuteClick = e => {
+      const target = e.target?.closest?.('[class*=player-controls__mute]');
+      if (target) { window.__wantMusicMuted = !window.__wantMusicMuted; window.dispatchEvent(new Event('musicMuteToggled')); }
+    };
+    document.addEventListener('click', this.onMusicMuteClick, { capture: true, passive: true });
     if ((screenfull_default()) && (screenfull_default()).enabled) {
       screenfull_default().on('change', this.onFullscreenChange);
     }
@@ -141125,6 +141255,18 @@ class Root {
   }
   destroy() {
     var _a;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.scrollObserver?.disconnect();
+    if (this.scrollListeners) {
+      for (const [el, callback] of this.scrollListeners) {
+        el.removeEventListener('touchmove', callback);
+        el.removeAttribute('swipe-patch');
+      }
+      this.scrollListeners.clear();
+    }
+    this.htmlRoot.removeEventListener('touchmove', this.preventDisallowEvents);
+    document.removeEventListener('click', this.onMusicMuteClick, true);
     document.removeEventListener('mousemove', this.onUserAction, true);
     document.removeEventListener('mousedown', this.onUserAction, true);
     document.removeEventListener('touchend', this.onUserAction, true);
@@ -141218,9 +141360,9 @@ class Root {
       if (!('wakeLock' in navigator)) return;
       try {
         const wakeLock = yield navigator.wakeLock.request('screen');
-        console.log('wakeLock', wakeLock);
+        globalThis.DEBUG_GAME_LOGS && console.log('wakeLock', wakeLock);
       } catch (e) {
-        console.log('wakeLock-error', e);
+        globalThis.DEBUG_GAME_LOGS && console.log('wakeLock-error', e);
       }
     });
   }
@@ -141296,7 +141438,7 @@ class Root {
       const screenshot = yield html2canvas_default()(view.el, {
         useCORS: true
       });
-      console.log(`screenshot: ${table === null || table === void 0 ? void 0 : table.width}x${table === null || table === void 0 ? void 0 : table.height} in ${screenshot.width}x${screenshot.height}`);
+      globalThis.DEBUG_GAME_LOGS && console.log(`screenshot: ${table === null || table === void 0 ? void 0 : table.width}x${table === null || table === void 0 ? void 0 : table.height} in ${screenshot.width}x${screenshot.height}`);
       if (!table) return screenshot;
       const ctx = screenshot.getContext('2d');
       ctx.resetTransform();
@@ -141355,9 +141497,16 @@ class Root {
         patchScrollOverflow(el);
       }
     };
-    checkScrolls();
+    this.scrollListeners = new Map();
     try {
-      const __scrollMO = new MutationObserver((mutations) => {
+      this.scrollObserver = new MutationObserver((mutations) => {
+        for (const [el, callback] of this.scrollListeners) {
+          if (!el.isConnected) {
+            el.removeEventListener('touchmove', callback);
+            el.removeAttribute('swipe-patch');
+            this.scrollListeners.delete(el);
+          }
+        }
         for (const mut of mutations) {
           mut.addedNodes && mut.addedNodes.forEach((node) => {
             if (node.nodeType !== 1) return;
@@ -141374,7 +141523,7 @@ class Root {
           });
         }
       });
-      __scrollMO.observe(document.body, { childList: true, subtree: true });
+      this.scrollObserver.observe(document.body, { childList: true, subtree: true });
     } catch (moErr) {}
     const allowEvents = new WeakMap();
     const patchScrollOverflow = el => {
@@ -141386,15 +141535,17 @@ class Root {
           allowEvents.set(e, true);
         }
       };
-      el.addEventListener('touchmove', overflowUpdater);
+      el.addEventListener('touchmove', overflowUpdater, { passive: true });
+      this.scrollListeners.set(el, overflowUpdater);
       el.setAttribute(ATTR, 'patched');
     };
-    const preventDisallowEvents = e => {
+    this.preventDisallowEvents = e => {
       if (!allowEvents.get(e)) {
         e.preventDefault();
       }
     };
-    this.htmlRoot.addEventListener('touchmove', preventDisallowEvents);
+    this.htmlRoot.addEventListener('touchmove', this.preventDisallowEvents, { passive: false });
+    checkScrolls();
   }
   setHtmlRootPosition(x, y, w, h) {
     this.htmlRoot.style.left = `${Math.round(x)}px`;
@@ -141405,8 +141556,8 @@ class Root {
   updateLayout() {
     const w = this.htmlRoot.clientWidth;
     const h = this.htmlRoot.clientHeight;
-    if (w === h && w === Math.min(this.root.width, this.root.height)) return;
-    console.log(`root.size: ${w}x${h}`);
+    if (w === this.root.width && h === this.root.height) return;
+    globalThis.DEBUG_GAME_LOGS && console.log(`root.size: ${w}x${h}`);
     this.root.width = w;
     this.root.height = h;
     const layout = this.updateViewFrame(this.getLayout());
@@ -141651,7 +141802,7 @@ class Adjust2 {
     this.v8.request('trackEvent', {
       eventToken,
       params
-    }).catch(e => console.log('adjust.trackEvent failed:', e));
+    }).catch(e => globalThis.DEBUG_GAME_LOGS && console.log('adjust.trackEvent failed:', e));
   }
   setPushToken(token) {
     return __awaiter(this, void 0, void 0, function* () {
@@ -142243,7 +142394,7 @@ class AGStore {
           purchaseToken: purchaseData.purchaseToken
         });
       });
-      console.log('Consumed purchase:', consumeResult);
+      globalThis.DEBUG_GAME_LOGS && console.log('Consumed purchase:', consumeResult);
     });
   }
   premiumOption() {
@@ -142745,7 +142896,7 @@ class BillingScope {
           const result = yield block();
           checkAlive();
           if (tryAvailability || tryReconnect || retry) {
-            console.log(`${tryAvailability} ${tryReconnect} ${retry}`);
+            globalThis.DEBUG_GAME_LOGS && console.log(`${tryAvailability} ${tryReconnect} ${retry}`);
             capture_message(`BillingScope: retry success`);
           }
           return result;
@@ -142805,10 +142956,10 @@ class GPStore {
     this.host = host;
     this.scope = new BillingScope(gms, host);
     android_callbacks['GPStore_disconnected'] = () => {
-      console.log('GPStore.disconnected');
+      globalThis.DEBUG_GAME_LOGS && console.log('GPStore.disconnected');
     };
     android_callbacks['GPStore_updated'] = purchases => {
-      console.log('GPStore.updated:', purchases);
+      globalThis.DEBUG_GAME_LOGS && console.log('GPStore.updated:', purchases);
       const br = purchases.billingResult;
       if (br.responseCode === ResponseCode.OK) {} else if (br.responseCode === ResponseCode.USER_CANCELED) {} else {
         BillingScope.assert('GPStore_updated', purchases);
@@ -142827,7 +142978,7 @@ class GPStore {
         });
         const code2 = r2.billingResult.responseCode;
         const supportsPD = code2 === ResponseCode.OK ? true : code2 === ResponseCode.FEATURE_NOT_SUPPORTED ? false : BillingScope.assert('isFeatureSupported', r2);
-        console.log(`GPStore.supportsPD: ${supportsPD}`);
+        globalThis.DEBUG_GAME_LOGS && console.log(`GPStore.supportsPD: ${supportsPD}`);
         const query = supportsPD ? ProductDetailsProduct.query : SkuDetailsProduct.query;
         const [inapp, subs] = yield Promise.all([query(this.host, 'inapp', INAPP_IDS), query(this.host, 'subs', SUBS_IDS)]);
         return [...inapp, ...subs];
@@ -142940,13 +143091,13 @@ class GPStore {
       const r = yield this.scope.run(() => this.host.request('queryPurchasesAsync', {
         productType: 'inapp'
       }));
-      console.log('GPStore.queryPurchases', r.result);
+      globalThis.DEBUG_GAME_LOGS && console.log('GPStore.queryPurchases', r.result);
       for (const purchase of r.result) this.update(purchase);
     });
   }
   update(purchase) {
     return __awaiter(this, void 0, void 0, function* () {
-      console.log('GPStore.update', JSON.stringify(purchase));
+      globalThis.DEBUG_GAME_LOGS && console.log('GPStore.update', JSON.stringify(purchase));
       switch (purchase.purchaseState) {
         case PurchaseState.PENDING:
         case PurchaseState.UNSPECIFIED_STATE:
@@ -143090,11 +143241,11 @@ function initHost() {
       const host = window[hostName];
       if (!host) throw new Error(`AWV: no host: ${hostName}`);
       const client = new dist.JSONRPCClient(msg => __awaiter(this, void 0, void 0, function* () {
-        console.log(`${name}.send:`, JSON.stringify(msg));
+        if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
         host.postMessage(JSON.stringify(msg));
       }));
       cbs[hostName + '_cb'] = msg => {
-        console.log(`${name}.recv:`, JSON.stringify(msg));
+        if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
         client.receive(msg);
       };
       for (let i = 1; i <= api; i++) {
@@ -143180,16 +143331,16 @@ class Main {
           args[_key] = arguments[_key];
         }
         const e = args[0];
-        console.log(`js-error: ${e}`);
+        globalThis.DEBUG_GAME_LOGS && console.log(`js-error: ${e}`);
         onerror === null || onerror === void 0 ? void 0 : onerror.apply(this, args);
       };
       const onunhandledrejection = window.onunhandledrejection;
       window.onunhandledrejection = function (e) {
-        console.log(`js-rejection: ${e.reason}`);
+        globalThis.DEBUG_GAME_LOGS && console.log(`js-rejection: ${e.reason}`);
         onunhandledrejection === null || onunhandledrejection === void 0 ? void 0 : onunhandledrejection.apply(this, arguments);
       };
       this._systemConfig = yield this.host.request('systemConfig');
-      console.log('bridge version: ', this.systemConfig.v);
+      globalThis.DEBUG_GAME_LOGS && console.log('bridge version: ', this.systemConfig.v);
       const cfg = this.systemConfig;
       const TAGS = ['api_level', 'brand', 'country', 'flavor', 'language', 'versionCode'];
       for (const tag of TAGS) setTag(tag, cfg[tag]);
@@ -143384,7 +143535,7 @@ class Main {
           url: imageUrl,
           filename: `${+new Date()}.png`
         }));
-        console.log('image.stream: ', stream);
+        globalThis.DEBUG_GAME_LOGS && console.log('image.stream: ', stream);
         const intent = {
           action: Intent.ACTION_SEND,
           type: stream ? 'image/*' : 'text/plain',
@@ -143581,7 +143732,7 @@ class MMSocial {
       var _this = this;
       let params = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
       return function* () {
-        console.log('mm.invoke:', method, params);
+        if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
         const q = Object.assign(Object.assign({}, params), {
           method,
           app_id: MMSocial_APP_ID,
@@ -143591,7 +143742,7 @@ class MMSocial {
         const data = yield _this.main.httpRequest({
           url: `https://www.appsmail.ru/platform/api?${queryStringBuilder(q)}`
         });
-        console.log('mm.invoke.result:', data);
+        if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
         const result = JSON.parse(data);
         return result;
       }();
@@ -144103,7 +144254,7 @@ class VKSocial_VKSocial {
   login() {
     return __awaiter(this, void 0, void 0, function* () {
       const isAppInstalled = yield this.isAppInstalled();
-      console.log('isAppInstalled:', isAppInstalled);
+      globalThis.DEBUG_GAME_LOGS && console.log('isAppInstalled:', isAppInstalled);
       yield this.host.request('login', {
         scope: this.SCOPE,
         forceWebView: this.main.systemConfig.flavor !== 'googleplay'
@@ -144172,12 +144323,12 @@ class VKSocial_VKSocial {
   }
   vkApi(method, params) {
     return __awaiter(this, void 0, void 0, function* () {
-      console.log(`vkApi.${method}:`, JSON.stringify(params));
+      if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
       const response = yield this.host.request('request', {
         method,
         params
       });
-      console.log('vkApi.result:', JSON.stringify(response));
+      if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
       return response.response;
     });
   }
@@ -144202,7 +144353,7 @@ class VKSocial_VKSocial {
   search(query) {
     return __awaiter(this, void 0, void 0, function* () {
       const defaultSongs = yield this.getDefaultAudios();
-      console.log(defaultSongs);
+      globalThis.DEBUG_GAME_LOGS && console.log(defaultSongs);
       return songFilter(query, defaultSongs);
     });
   }
@@ -144654,7 +144805,7 @@ class AndroidSocialManager {
     return __awaiter(this, void 0, void 0, function* () {
       while (true) {
         const activeId = this.shared.activeSocial;
-        console.log('active social: ' + activeId);
+        globalThis.DEBUG_GAME_LOGS && console.log('active social: ' + activeId);
         this.social = this.socials[activeId];
         if (this.social) {
           try {
@@ -144770,7 +144921,7 @@ class AndroidSocialManager {
       const referrer = yield this.main.installReferrer();
       if (!referrer) return;
       if (this.shared.referrer && this.shared.referrer === referrer) return;
-      console.log(`Referrer updated: ${referrer}`);
+      globalThis.DEBUG_GAME_LOGS && console.log(`Referrer updated: ${referrer}`);
       this.shared.referrer = referrer;
       (_a = this.sessionContext) === null || _a === void 0 ? void 0 : _a.session.fixReferrerType(referrer);
     });
@@ -145019,7 +145170,7 @@ class Handler {
         reject,
         msg
       };
-      console.log(`req:${this.cbName}:${reqId}`, msg);
+      if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
       this.messageHandler.postMessage(msg);
     });
   }
@@ -145034,7 +145185,7 @@ class Handler {
   }
   response(msg) {
     const reqId = msg.reqId;
-    console.log(`res:${this.cbName}:${reqId}`, msg);
+    if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
     const req = this.requests[reqId];
     delete this.requests[reqId];
     if (!req) throw new Error(`No req found in ${this.cbName}`);
@@ -145072,7 +145223,7 @@ function init() {
     if (systemId) {
       const v = systemId.v;
       for (let i = 2; i <= v; i++) host_H[`v${i}`] = host_H;
-      console.log('iOS bridge version: ', v);
+      globalThis.DEBUG_GAME_LOGS && console.log('iOS bridge version: ', v);
     }
   });
 }
@@ -145289,14 +145440,14 @@ class ASSocial {
   }
   update(state) {
     var _a;
-    console.log(`ASSocial.update: ${state}`);
+    globalThis.DEBUG_GAME_LOGS && console.log(`ASSocial.update: ${state}`);
     if (!isAuthorized(state)) (_a = this.onlogout) === null || _a === void 0 ? void 0 : _a.call(this);
   }
   restore() {
     return __awaiter(this, void 0, void 0, function* () {
       if (!host_H.v6) throw new Error(`Check isSupported`);
       const [userID, refreshToken, name] = yield Promise.all([UserDefaults.get(CLZ_AS_USER_ID), UserDefaults.get(CLZ_AS_REFRESH_TOKEN), UserDefaults.get(CLZ_AS_NAME)]);
-      console.log('refresh restored: ', userID, refreshToken);
+      if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
       const state = yield host_H.v6.AS.call({
         type: 'getCredentialState',
         userID
@@ -145306,7 +145457,7 @@ class ASSocial {
         grant_type: 'refresh_token',
         refresh_token: refreshToken
       });
-      console.log('refereshResponse: ', refreshResponse);
+      if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
       yield this.loginRequest(userID, refreshResponse.id_token, name);
     });
   }
@@ -145317,14 +145468,14 @@ class ASSocial {
         type: 'auth',
         scopes: ['FullName']
       });
-      console.log('authData:', authData);
+      if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
       const name = authData.givenName || undefined;
       const authResponse = yield this.fetchToken({
         code: authData.authorizationCode,
         grant_type: 'authorization_code',
         redirect_uri: 'REDIRECT_URI'
       });
-      console.log('authResponse:', authResponse);
+      if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
       yield Promise.all([UserDefaults.set(CLZ_AS_USER_ID, authData.user), UserDefaults.set(CLZ_AS_REFRESH_TOKEN, authResponse.refresh_token), UserDefaults.set(CLZ_AS_NAME, name)]);
       yield this.loginRequest(authData.user, authResponse.id_token, name);
     });
@@ -145458,7 +145609,7 @@ class ts_FBSocial_FBSocial {
   loginRequestImpl() {
     return __awaiter(this, void 0, void 0, function* () {
       if (host_H.v14) {
-        console.log('fbsdk: no refresh');
+        globalThis.DEBUG_GAME_LOGS && console.log('fbsdk: no refresh');
       } else {
         yield host_H.FBSDK.call({
           type: 'refreshCurrentAccessToken'
@@ -145683,7 +145834,7 @@ function main_init() {
     yield main_main.init();
     main_main.setIconBadgeNumber(0);
     ios_callbacks['main_updateReferrer'] = referrer => {
-      console.log('referrer:', referrer);
+      globalThis.DEBUG_GAME_LOGS && console.log('referrer:', referrer);
     };
     ios_callbacks['main_updateInstallData'] = data => {
       var _a;
@@ -146054,7 +146205,7 @@ class SKAdapter {
         type: 'start',
         productIds: ALL_OPTIONS.map(o => o.productId)
       });
-      console.log('productsTask:', JSON.stringify(products));
+      globalThis.DEBUG_GAME_LOGS && console.log('productsTask:', JSON.stringify(products));
       const result = {};
       for (const p of products) result[p.id] = p;
       return result;
@@ -146078,9 +146229,9 @@ class SKAdapter {
       const ops = [...SKAdapter_BANK[socialId]];
       for (const o of ops) {
         if (products[o.productId]) continue;
-        console.log('products start');
-        for (const k in products) console.log(k, products[k]);
-        console.log('products end');
+        globalThis.DEBUG_GAME_LOGS && console.log('products start');
+        for (const k in products) globalThis.DEBUG_GAME_LOGS && console.log(k, products[k]);
+        globalThis.DEBUG_GAME_LOGS && console.log('products end');
         break;
       }
       return ops.filter(o => products[o.productId]).map(o => ({
@@ -146117,7 +146268,7 @@ class SKAdapter {
   }
   tryPurchase(t) {
     return __awaiter(this, void 0, void 0, function* () {
-      console.log('NEW', t);
+      globalThis.DEBUG_GAME_LOGS && console.log('NEW', t);
       const SKErrorPaymentCancelled = 2;
       if (!this.delegate) return;
       switch (t.state) {
@@ -146908,9 +147059,9 @@ class SocialManager {
       try {
         token = yield main_main.registerUserNotificationSettings(['alert', 'badge', 'sound']);
       } catch (e) {
-        console.log('User decline push notifications', e);
+        globalThis.DEBUG_GAME_LOGS && console.log('User decline push notifications', e);
       }
-      console.log('User push token: ', token);
+      if (globalThis.DEBUG_GAME_LOGS) console.debug('client bridge event');
       if (!token) return;
       session.setPushToken(token);
       Adjust_adjustHost.setPushToken(token);
@@ -147459,7 +147610,7 @@ const preload = (htmlRoot, splash) => __awaiter(void 0, void 0, void 0, function
   const root = new Root(htmlRoot);
   const factory = root.createFactory();
   const rendererResult = root.appScope.tableView_renderer;
-  console.log('rendererResult: ', rendererResult);
+  globalThis.DEBUG_GAME_LOGS && console.log('rendererResult: ', rendererResult);
   if (!rendererResult.isOk) {
     showPreloaderError(factory, new Error('renderer_error'));
     return;
@@ -147649,7 +147800,7 @@ const preload = (htmlRoot, splash) => __awaiter(void 0, void 0, void 0, function
     supportSfxVolumeControl = !isIOS && !isIpadOS();
     PIXIPatcher.allowMobileHover = !isIOS;
   } else {
-    console.log('FALLBACK-TO-WEB-SOCIAL'); social = { id: 'web', isApple: false, isMobile: false, canDisableVerticalSwipes: false, safeArea: { top: 0, bottom: 0, left: 0, right: 0 }, createPreferences: () => Promise.resolve(new LocalStoragePreferences()), load: () => Promise.resolve(), playbackItems: [{ type: 'yt', origin: 'https://www.youtube.com' }], prepareBank: () => Promise.resolve({ vipOptions: () => [{ period: '1 hefte', isPopular: false, price: '300 kristal', term: '', isInfo: false, purchase: () => window.mgBuyVip('week') },{ period: '1 ay', isPopular: true, price: '500 kristal', term: '', isInfo: false, purchase: () => window.mgBuyVip('month') }], purchaseOptions: () => [{ gold: 10, bonus: 0, price: '10 kristal', purchase: () => window.mgBuyCoins(10) },{ gold: 50, bonus: 0, price: '50 kristal', purchase: () => window.mgBuyCoins(50) },{ gold: 100, bonus: 0, price: '100 kristal', purchase: () => window.mgBuyCoins(100) },{ gold: 500, bonus: 0, price: '500 kristal', purchase: () => window.mgBuyCoins(500) },{ gold: 1000, bonus: 100, price: '1000 kristal', purchase: () => window.mgBuyCoins(1000) }], welcomeOffer: () => false, giftOptions: () => [], premiumOption: () => ({ price: '500 kristal', purchase: () => window.mgBuyPass() }) }), createInviter: () => ({ type: 'native', invite: () => Promise.resolve(false) }), settingsOptions: () => [], feedbackOps: [], audioItem: { type: 'cz' }, videoItem: { type: 'yt' }, loginData: {}, setSession: () => {}, queryCaps: () => Promise.resolve({}), logout: true }; console.log('SOCIAL-CREATED-web'); maxScreen = { width: Math.min(htmlRoot.clientWidth, Math.round(htmlRoot.clientHeight * 1000 / 620)), height: htmlRoot.clientHeight, dpr: window.devicePixelRatio };
+    globalThis.DEBUG_GAME_LOGS && console.log('FALLBACK-TO-WEB-SOCIAL'); social = { id: 'web', isApple: false, isMobile: false, canDisableVerticalSwipes: false, safeArea: { top: 0, bottom: 0, left: 0, right: 0 }, createPreferences: () => Promise.resolve(new LocalStoragePreferences()), load: () => Promise.resolve(), playbackItems: [{ type: 'yt', origin: 'https://www.youtube.com' }], prepareBank: () => Promise.resolve({ vipOptions: () => [{ period: '1 hefte', isPopular: false, price: '300 kristal', term: '', isInfo: false, purchase: () => window.mgBuyVip('week') },{ period: '1 ay', isPopular: true, price: '500 kristal', term: '', isInfo: false, purchase: () => window.mgBuyVip('month') }], purchaseOptions: () => [{ gold: 10, bonus: 0, price: '10 kristal', purchase: () => window.mgBuyCoins(10) },{ gold: 50, bonus: 0, price: '50 kristal', purchase: () => window.mgBuyCoins(50) },{ gold: 100, bonus: 0, price: '100 kristal', purchase: () => window.mgBuyCoins(100) },{ gold: 500, bonus: 0, price: '500 kristal', purchase: () => window.mgBuyCoins(500) },{ gold: 1000, bonus: 100, price: '1000 kristal', purchase: () => window.mgBuyCoins(1000) }], welcomeOffer: () => false, giftOptions: () => [], premiumOption: () => ({ price: '500 kristal', purchase: () => window.mgBuyPass() }) }), createInviter: () => ({ type: 'native', invite: () => Promise.resolve(false) }), settingsOptions: () => [], feedbackOps: [], audioItem: { type: 'cz' }, videoItem: { type: 'yt' }, loginData: {}, setSession: () => {}, queryCaps: () => Promise.resolve({}), logout: true }; globalThis.DEBUG_GAME_LOGS && console.log('SOCIAL-CREATED-web'); maxScreen = { width: Math.min(htmlRoot.clientWidth, Math.round(htmlRoot.clientHeight * 1000 / 620)), height: htmlRoot.clientHeight, dpr: window.devicePixelRatio };
   }
   root.dialogManager.hideSoftKeyboardOnShadeClick = IS_MOBILE;
   const platform = social instanceof SocialManager ? 'ios' : social instanceof AndroidSocialManager ? 'android' : social.id;
@@ -147758,11 +147909,15 @@ function run(env, factory, social, config, splash) {
         factory.photoLoader.timeout = 3000;
       }
       let result;
+      let reconnectAttempt = 0;
       while (true) {
+        const sessionStartedAt = Date.now();
         result = yield main(env, factory, social, config);
+        if (Date.now() - sessionStartedAt > 30000) reconnectAttempt = 0;
         if (result.type === 'logout') {
           break;
         } else if (result.type === 'reconnect') {
+          yield delay(Math.min(10000, 500 * Math.pow(2, reconnectAttempt++)) + Math.random() * 250);
           continue;
         } else {
           (x => {})(result.type);
@@ -147788,7 +147943,7 @@ function resolveSystemId(promise) {
     try {
       return yield promise !== null && promise !== void 0 ? promise : querySystemId();
     } catch (e) {
-      console.log(e);
+      globalThis.DEBUG_GAME_LOGS && console.log(e);
       capture_message(`Fingerprint error`);
       return 'error';
     }

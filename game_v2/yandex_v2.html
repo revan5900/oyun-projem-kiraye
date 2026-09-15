@@ -35,27 +35,13 @@ body {
 <script>
 function start() {
   window["splash"] && splash(
-    {"publicPath":"","js":["splash_new.js?v=1787896431","preloader_new.js?v=1789289617722"],"css":["preloader_new.css"]},
+    {"publicPath":"","js":["splash_new.js?v=1787896431","preloader_new.js?v=kiraye-reliability-20260915"],"css":["preloader_new.css"]},
     document.getElementById("game")
   );
 }
 </script>
 <script src="splash_new.js?v=1787896431"></script>
-<script>
-(function() {
-  function forceYoutubePlay() {
-    var iframes = document.querySelectorAll('iframe[src*="youtube"]');
-    iframes.forEach(function(f) {
-      try {
-        f.contentWindow.postMessage(JSON.stringify({event:'command', func:'unMute', args:[]}), '*');
-        f.contentWindow.postMessage(JSON.stringify({event:'command', func:'playVideo', args:[]}), '*');
-      } catch(e) {}
-    });
-  }
-  document.addEventListener('touchstart', forceYoutubePlay, true);
-  document.addEventListener('click', forceYoutubePlay, true);
-})();
-</script></head>
+</head>
 <body onload="window['start'] && start();">
 <div id="game-wrap"><div id="game"></div></div>
 <script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v4513226cdae34746b4dedf0b4dfa099e1781791509496" integrity="sha512-ZE9pZaUXND66v380QUtch/5sE9tPFh2zg45pR2PB0CVkCtOREv2AJKkSidISWkysEuQ0EH8faUU5du78bx87UQ==" data-cf-beacon='{"version":"2024.11.0","token":"9f236aa0a99a4d40868be5545654214e","r":1}' crossorigin="anonymous"></script>

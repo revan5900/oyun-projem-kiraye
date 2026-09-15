@@ -29,6 +29,10 @@ const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
 const googleClient = new OAuth2Client('47413688547-qug79v2eb2ld23hk1siq3eo4gdkbkoql.apps.googleusercontent.com');
 
+const { heartbeat, markPong, createGameSender, replaceRoomSocket, createAssetRefresh, ActivityTracker } = require('./game-reliability');
+const DEBUG_GAME_LOGS = process.env.DEBUG_GAME_LOGS === '1' || process.env.DEBUG_GAME_LOGS === 'true';
+function debugGame(...args) { if (DEBUG_GAME_LOGS) console.log(...args); }
+const sendGame = createGameSender(encodeMessage);
 const db = require('./db');
 const game = require('./game');
 const authLib = require('./auth');
@@ -247,17 +251,51 @@ app.post('/api/profile/avatar', authLib.requireUser, (req, res) => {
     res.json({ success: true });
 });
 // Avatari HTTP ile gostermek (WebSocket mesaj olcusu limitine dusmemek ucun)
-app.get('/api/avatar/:id', (req, res) => {
-    const user = db.prepare('SELECT avatar_data FROM users WHERE id = ?').get(req.params.id);
-    if (!user || !user.avatar_data || user.avatar_data.includes('no_profil')) return res.status(404).send('No avatar');
-    if (user.avatar_data.startsWith('http://') || user.avatar_data.startsWith('https://')) {
-        return res.redirect(user.avatar_data);
-    }
-    const matches = user.avatar_data.match(/^data:(image\/\w+);base64,(.+)$/);
-    if (!matches) return res.status(400).send('Invalid avatar data');
-    const buffer = Buffer.from(matches[2], 'base64');
-    res.set('Content-Type', matches[1]);
-    res.send(buffer);
+const DEFAULT_AVATAR = '<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><rect width="128" height="128" rx="64" fill="#dde8ed"/><circle cx="64" cy="47" r="23" fill="#8da4af"/><path d="M20 120v-12a44 44 0 0 1 88 0v12" fill="#8da4af"/></svg>';
+const avatarCache = new Map();
+const avatarInFlight = new Map();
+async function remoteAvatar(url) {
+  const cached = avatarCache.get(url);
+  if (cached && cached.expires > Date.now()) return cached.value;
+  if (avatarInFlight.has(url)) return avatarInFlight.get(url);
+  const promise = (async () => {
+    let value = null;
+    try {
+      const parsed = new URL(url);
+      const trusted = /(^|\.)(gul\.az|googleusercontent\.com|fbcdn\.net|okcdn\.ru|vkuserphoto\.ru|ciliz\.com)$/i.test(parsed.hostname);
+      if (!trusted || !['https:', 'http:'].includes(parsed.protocol) || parsed.port || parsed.username || parsed.password) throw new Error('avatar_origin');
+      const response = await fetch(parsed, { redirect: 'error', signal: AbortSignal.timeout(5000) });
+      const type = (response.headers.get('content-type') || '').split(';')[0];
+      if (!response.ok || !/^image\/(png|jpeg|webp|gif)$/.test(type)) { await response.body?.cancel(); throw new Error('avatar_unavailable'); }
+      const chunks = []; let size = 0;
+      for await (const chunk of response.body) {
+        size += chunk.length;
+        if (size > 2 * 1024 * 1024) throw new Error('avatar_too_large');
+        chunks.push(chunk);
+      }
+      value = { type, body: Buffer.concat(chunks) };
+    } catch (_) { /* Missing/unreachable remote avatars use the local fallback. */ }
+    if (avatarCache.size >= 128) avatarCache.delete(avatarCache.keys().next().value);
+    avatarCache.set(url, { value, expires: Date.now() + 300000 });
+    return value;
+  })().finally(() => avatarInFlight.delete(url));
+  avatarInFlight.set(url, promise);
+  return promise;
+}
+app.get('/api/avatar/:id', async (req, res) => {
+    res.set('Cache-Control', 'public, max-age=300');
+    const fallback = () => res.type('image/svg+xml').send(DEFAULT_AVATAR);
+    try {
+      const user = db.prepare('SELECT avatar_data FROM users WHERE id = ?').get(req.params.id);
+      if (!user || !user.avatar_data || user.avatar_data.includes('no_profil')) return fallback();
+      if (/^https?:\/\//.test(user.avatar_data)) {
+        const avatar = await remoteAvatar(user.avatar_data);
+        return avatar ? res.type(avatar.type).send(avatar.body) : fallback();
+      }
+      const matches = user.avatar_data.match(/^data:(image\/\w+);base64,(.+)$/);
+      if (!matches) return fallback();
+      res.type(matches[1]).send(Buffer.from(matches[2], 'base64'));
+    } catch (_) { return fallback(); }
 });
 // Google ile giris
 app.post('/api/google-login', async (req, res) => {
@@ -295,9 +333,9 @@ app.post('/api/google-login', async (req, res) => {
             ).run(email, name || email, picture || null, googleId);
             user = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
             if (device_id) { try { db.prepare('INSERT INTO device_bindings (device_id, user_id, ip_address) VALUES (?, ?, ?)').run(device_id, user.id, getClientIp(req)); } catch (e) {} }
-            console.log('WS: Google ile yeni istifadeci qeydiyyati - ' + email);
+            DEBUG_GAME_LOGS && debugGame('WS: Google ile yeni istifadeci qeydiyyati - ' + email);
         } else {
-            console.log('WS: Google ile giris - ' + email);
+            DEBUG_GAME_LOGS && debugGame('WS: Google ile giris - ' + email);
         }
         const token = jwt.sign({ id: user.id, username: user.username, role: 'user' }, JWT_SECRET, { expiresIn: '30d' });
         res.json({
@@ -362,9 +400,9 @@ app.get('/api/temp-check-owned/:username', (req, res) => {
     const user = db.prepare('SELECT id, username, owned_items FROM users WHERE username LIKE ?').get('%' + req.params.username + '%');
     res.json(user || { error: 'not_found' });
 });
-app.get('/api/assets-proxy', async (req, res) => {
-    try {
-        const upstreamRes = await fetch('https://butilochka.cdnvideo.ru/mobile/assets.json?c9c6c5dbd89e12cc');
+const refreshAssets = createAssetRefresh(async () => {
+        const upstreamRes = await fetch('https://butilochka.cdnvideo.ru/mobile/assets.json?c9c6c5dbd89e12cc', { signal: AbortSignal.timeout(10000) });
+        if (!upstreamRes.ok) throw new Error('assets_upstream_failed');
         const json = await upstreamRes.json();
         if (json.bottles && Array.isArray(json.bottles.__store)) {
             const existingIds = new Set(json.bottles.__store.map(b => b.id));
@@ -374,7 +412,7 @@ app.get('/api/assets-proxy', async (req, res) => {
                     json.bottles.__store.push({ id: key });
                 }
             });
-            console.log('WS: assets-proxy - sise sayi genisleneildi, yeni __store uzunlugu=' + json.bottles.__store.length);
+            DEBUG_GAME_LOGS && debugGame('WS: assets-proxy - sise sayi genisleneildi, yeni __store uzunlugu=' + json.bottles.__store.length);
         }
         if (json.gifts) {
             const skipKeys = ['id','type'];
@@ -396,7 +434,7 @@ app.get('/api/assets-proxy', async (req, res) => {
                     if (!existingIds0.has(key)) json.gifts.__store.push({ id: key });
                 });
             }
-            console.log('WS: assets-proxy - hediyye store versiyalari genislenildi: ' + storeVersionKeys.join(','));
+            DEBUG_GAME_LOGS && debugGame('WS: assets-proxy - hediyye store versiyalari genislenildi: ' + storeVersionKeys.join(','));
         }
         if (json.achievement) {
           Object.keys(json.achievement).forEach(k => {
@@ -405,19 +443,18 @@ app.get('/api/assets-proxy', async (req, res) => {
               ach.counters = ach.counters.map(n => (typeof n === 'number') ? Math.round(n * 2) : n);
             }
           });
-          console.log('WS: assets-proxy - nailiyyet heddleri 2x cetinlesdirildi');
+          DEBUG_GAME_LOGS && debugGame('WS: assets-proxy - nailiyyet heddleri 2x cetinlesdirildi');
         }
-        try {
-          await require('fs').promises.writeFile(require('path').join(__dirname, 'game-assets', 'assets.json'), JSON.stringify(json));
-          console.log('WS: assets-proxy - lokal fayl yenilendi');
-        } catch (saveErr) {
-          console.error('assets-proxy lokal saxlama xetasi:', saveErr.message);
-        }
-        res.set('Content-Type', 'application/json');
-        res.set('Cache-Control', 'no-store');
-        res.send(JSON.stringify(json));
-    } catch (e) {
-        console.error('assets-proxy xetasi:', e.message);
+        return json;
+}, require('fs').promises, path.join(__dirname, 'game-assets', 'assets.json'), () => {
+    console.error('assets-proxy: cache_write_failed');
+});
+app.get('/api/assets-proxy', async (req, res) => {
+    try {
+        const text = await refreshAssets();
+        res.type('application/json').set('Cache-Control', 'no-store').send(text);
+    } catch (_) {
+        console.error('assets-proxy: refresh_failed');
         res.status(500).json({ error: 'proxy_failed' });
     }
 });
@@ -537,7 +574,7 @@ app.get('/api/live-gifts-catalog', authLib.requireUser, requireSameSiteBrowser, 
         });
         res.set({ 'Cache-Control': 'no-store, private', 'Pragma': 'no-cache', 'X-Content-Type-Options': 'nosniff' });
         res.json(catalog);
-    } catch (e) { console.log('LIVE-GIFTS-CATALOG-XETA: ' + e.message); res.status(500).json({ error: 'catalog_error' }); }
+    } catch (e) { DEBUG_GAME_LOGS && debugGame('LIVE-GIFTS-CATALOG-XETA: ' + e.message); res.status(500).json({ error: 'catalog_error' }); }
 });
 app.get('/api/my-tokens', authLib.requireUser, (req, res) => {
     const user = db.prepare('SELECT live_tokens, crystals, gift_level_score FROM users WHERE id = ?').get(req.user.id);
@@ -558,7 +595,7 @@ app.delete('/api/admin/users/:id', authLib.requireAdmin, (req, res) => {
             } catch (e) {}
         });
         db.prepare('DELETE FROM users WHERE id = ?').run(targetId);
-        console.log('ADMIN: istifadeci silindi - id=' + targetId);
+        DEBUG_GAME_LOGS && debugGame('ADMIN: istifadeci silindi - id=' + targetId);
         res.json({ success: true });
     } catch (e) {
         console.error('Istifadeci silme xetasi:', e.message);
@@ -585,7 +622,7 @@ app.post('/api/admin/ban-device/:userId', authLib.requireAdmin, (req, res) => {
     bindings.forEach(b => {
         try { db.prepare('INSERT OR REPLACE INTO banned_devices (device_id, ip_address, reason) VALUES (?, ?, ?)').run(b.device_id, b.ip_address, 'admin_ban'); } catch (e) {}
     });
-    console.log('ADMIN: cihaz banlandi - user_id=' + targetId + ' cihaz sayi=' + bindings.length);
+    DEBUG_GAME_LOGS && debugGame('ADMIN: cihaz banlandi - user_id=' + targetId + ' cihaz sayi=' + bindings.length);
     res.json({ success: true, banned_count: bindings.length });
 });
 app.post('/api/admin/unban-device/:userId', authLib.requireAdmin, (req, res) => {
@@ -742,7 +779,7 @@ app.get('/api/external-login', (req, res) => {
       const redirectUrl = '/profile-v2?t=' + token + (returnUrl ? '&return_url=' + encodeURIComponent(returnUrl) : '');
       res.redirect(redirectUrl);
     } catch (e) {
-      console.log('EXTERNAL-LOGIN-XETA: ' + e.message);
+      DEBUG_GAME_LOGS && debugGame('EXTERNAL-LOGIN-XETA: ' + e.message);
       res.status(500).send('Xeta bas verdi');
     }
 });
@@ -941,10 +978,10 @@ app.get('/api/ciliz-direct/*', async (req, res) => {
     const targetUrl = `https://youtube.ciliz.com/` + targetPath + '?' + qs;
     const response = await fetch(targetUrl);
     const text = await response.text();
-    console.log('CILIZ-DIRECT: ' + targetUrl + ' -> status ' + response.status);
+    DEBUG_GAME_LOGS && debugGame('CILIZ-DIRECT: ' + targetUrl + ' -> status ' + response.status);
     res.status(response.status).type('application/json').send(text);
   } catch (e) {
-    console.log('CILIZ-DIRECT-XETA: ' + e.message);
+    DEBUG_GAME_LOGS && debugGame('CILIZ-DIRECT-XETA: ' + e.message);
     res.status(500).json([]);
   }
 });
@@ -955,10 +992,10 @@ app.get('/api/ciliz-proxy/*', async (req, res) => {
     const targetUrl = `https://api-proxy.ciliz.com/` + targetPath + '?' + qs;
     const response = await fetch(targetUrl);
     const text = await response.text();
-    console.log('CILIZ-PROXY: ' + targetUrl + ' -> status ' + response.status);
+    DEBUG_GAME_LOGS && debugGame('CILIZ-PROXY: ' + targetUrl + ' -> status ' + response.status);
     res.status(response.status).type('application/json').send(text);
   } catch (e) {
-    console.log('CILIZ-PROXY-XETA: ' + e.message);
+    DEBUG_GAME_LOGS && debugGame('CILIZ-PROXY-XETA: ' + e.message);
     res.status(500).json([]);
   }
 });
@@ -972,20 +1009,20 @@ app.use(express.static(GAME_DIR));
 
 // YouTube axtarish/musiqi proxy
 app.get('/api/ciliz-music/search', async (req, res) => {
-    console.log('CILIZ-MUSIC-SEARCH-CAGIRILDI: ' + req.query.query);
+    DEBUG_GAME_LOGS && debugGame('CILIZ-MUSIC-SEARCH-CAGIRILDI: ' + req.query.query);
     try {
         const q = req.query.query || '';
         const count = req.query.count || 20;
         const cacheKey = 'cilizmusicsearch_' + q.toLowerCase().trim() + '_' + count;
         const cachedSearch = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(cacheKey);
         if (cachedSearch) {
-            console.log('WS: ciliz-music axtarisi keshden - ' + q);
+            DEBUG_GAME_LOGS && debugGame('WS: ciliz-music axtarisi keshden - ' + q);
             return res.json(JSON.parse(cachedSearch.value));
         }
         let youtubeResults = [];
         try {
           const searchResult = await ytsr(q, { limit: Number(count) + 10 });
-          console.log('YTSR-DEBUG: total_items=' + searchResult.items.length + ' types=' + JSON.stringify(searchResult.items.map(i => i.type)));
+          DEBUG_GAME_LOGS && debugGame('YTSR-DEBUG: total_items=' + searchResult.items.length + ' types=' + JSON.stringify(searchResult.items.map(i => i.type)));
           const videos = searchResult.items.filter(item => item.type === 'video');
           youtubeResults = videos.slice(0, count).map(item => {
             const idMatch = item.url.match(/[?&]v=([^&]+)/);
@@ -1004,7 +1041,7 @@ app.get('/api/ciliz-music/search', async (req, res) => {
             };
           });
         } catch (ytErr) {
-          console.log('WS: ytsr axtaris xetasi - ' + ytErr.message);
+          DEBUG_GAME_LOGS && debugGame('WS: ytsr axtaris xetasi - ' + ytErr.message);
         }
         if (!youtubeResults || youtubeResults.length === 0) {
           try {
@@ -1019,12 +1056,12 @@ app.get('/api/ciliz-music/search', async (req, res) => {
               url: 'https://www.youtube.com/watch?v=' + v.id,
               provider: 'cz'
             }));
-            console.log('WS: youtubei.js elave etdi, say=' + youtubeResults.length);
+            DEBUG_GAME_LOGS && debugGame('WS: youtubei.js elave etdi, say=' + youtubeResults.length);
           } catch (itErr) {
-            console.log('WS: youtubei.js xetasi - ' + itErr.message);
+            DEBUG_GAME_LOGS && debugGame('WS: youtubei.js xetasi - ' + itErr.message);
           }
         }
-        
+
         if (!youtubeResults || youtubeResults.length === 0) {
           youtubeResults = await searchVimeo(q, count);
         }
@@ -1048,10 +1085,10 @@ app.get('/api/ciliz-music/search', async (req, res) => {
                   url: 'https://www.youtube.com/watch?v=' + item.id,
                   provider: 'cz'
                 }));
-                console.log('WS: youtube-api fallback ile tapildi - ' + q + ' - ' + youtubeResults.length + ' dene');
+                DEBUG_GAME_LOGS && debugGame('WS: youtube-api fallback ile tapildi - ' + q + ' - ' + youtubeResults.length + ' dene');
               }
             } catch (fbErr) {
-              console.log('WS: youtube-api fallback xetasi - ' + fbErr.message);
+              DEBUG_GAME_LOGS && debugGame('WS: youtube-api fallback xetasi - ' + fbErr.message);
             }
           }
         }db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(cacheKey, JSON.stringify(youtubeResults));
@@ -1106,16 +1143,16 @@ app.get('/api/youtube/search', async (req, res) => {
         const cacheKey = 'ytsearch_' + q.toLowerCase().trim() + '_' + count;
         const cachedSearch = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(cacheKey);
         if (cachedSearch) {
-            console.log('WS: youtube axtaris keshden - ' + q);
+            DEBUG_GAME_LOGS && debugGame('WS: youtube axtaris keshden - ' + q);
             return res.json(JSON.parse(cachedSearch.value));
         }
         let finalResults = [];
         try {
-          console.log('YTSR-DEBUG: axtaris bawladi - ' + q);
+          DEBUG_GAME_LOGS && debugGame('YTSR-DEBUG: axtaris bawladi - ' + q);
           const searchResult = await ytsr(q, { limit: Number(count) + 10 });
-          console.log('YTSR-DEBUG: total_items=' + searchResult.items.length);
+          DEBUG_GAME_LOGS && debugGame('YTSR-DEBUG: total_items=' + searchResult.items.length);
           if (searchResult.items[0]) {
-            console.log('YTSR-DEBUG: first_item=' + JSON.stringify(searchResult.items[0]).substring(0, 500));
+            DEBUG_GAME_LOGS && debugGame('YTSR-DEBUG: first_item=' + JSON.stringify(searchResult.items[0]).substring(0, 500));
           }
           const videos = searchResult.items.filter(item => item.type === 'video');
           finalResults = videos.slice(0, count).map(item => {
@@ -1133,7 +1170,7 @@ app.get('/api/youtube/search', async (req, res) => {
             };
           });
         } catch (ytErr) {
-          console.log('WS: ytsr axtaris xetasi - ' + ytErr.message);
+          DEBUG_GAME_LOGS && debugGame('WS: ytsr axtaris xetasi - ' + ytErr.message);
         }
         if (!finalResults || finalResults.length === 0) {
           try {
@@ -1146,9 +1183,9 @@ app.get('/api/youtube/search', async (req, res) => {
               icon: req.protocol + '://' + req.get('host') + '/api/thumbnail/' + v.id,
               duration: v.duration ? v.duration.seconds : 0
             }));
-            console.log('WS: youtubei.js elave etdi, say=' + youtubeResults.length);
+            DEBUG_GAME_LOGS && debugGame('WS: youtubei.js elave etdi, say=' + youtubeResults.length);
           } catch (itErr) {
-            console.log('WS: youtubei.js xetasi - ' + itErr.message);
+            DEBUG_GAME_LOGS && debugGame('WS: youtubei.js xetasi - ' + itErr.message);
           }
         }
         if (!finalResults || finalResults.length === 0) {
@@ -1173,10 +1210,10 @@ app.get('/api/youtube/search', async (req, res) => {
                   icon: req.protocol + '://' + req.get('host') + '/api/thumbnail/' + item.id,
                   duration: parseYoutubeDuration(item.contentDetails.duration)
                 }));
-                console.log('WS: youtube-api fallback (klip) ile tapildi - ' + q + ' - ' + finalResults.length + ' dene');
+                DEBUG_GAME_LOGS && debugGame('WS: youtube-api fallback (klip) ile tapildi - ' + q + ' - ' + finalResults.length + ' dene');
               }
             } catch (fbErr2) {
-              console.log('WS: youtube-api fallback (klip) xetasi - ' + fbErr2.message);
+              DEBUG_GAME_LOGS && debugGame('WS: youtube-api fallback (klip) xetasi - ' + fbErr2.message);
             }
           }
         }
@@ -1193,7 +1230,7 @@ app.get('/api/youtube/search', async (req, res) => {
         const cacheKey = 'vimeosearch_' + q.toLowerCase().trim() + '_' + count;
         const cachedSearch = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(cacheKey);
         if (cachedSearch) {
-            console.log('WS: vimeo-klip axtarisi keshden - ' + q);
+            DEBUG_GAME_LOGS && debugGame('WS: vimeo-klip axtarisi keshden - ' + q);
             return res.json(JSON.parse(cachedSearch.value));
         }
         const results = await searchVimeo(q, count);
@@ -1229,7 +1266,7 @@ app.get('/api/youtube/search', async (req, res) => {
         const cacheKey = 'cilizmusicpopular_' + count;
         const cachedPop = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(cacheKey);
         if (cachedPop) {
-            console.log('WS: ciliz-music populyar keshden');
+            DEBUG_GAME_LOGS && debugGame('WS: ciliz-music populyar keshden');
             return res.json(JSON.parse(cachedPop.value));
         }
         const apiKey = process.env.YOUTUBE_API_KEY;
@@ -1262,11 +1299,11 @@ app.get('/api/youtube/search', async (req, res) => {
                   url: item.link,
                   provider: 'vimeo'
                 }));
-                console.log('WS: vimeo-dan populyar tapildi - ' + finalResults.length + ' dene');
+                DEBUG_GAME_LOGS && debugGame('WS: vimeo-dan populyar tapildi - ' + finalResults.length + ' dene');
               }
             }
           } catch (vimeoErr) {
-            console.log('WS: vimeo axtaris xetasi - ' + vimeoErr.message);
+            DEBUG_GAME_LOGS && debugGame('WS: vimeo axtaris xetasi - ' + vimeoErr.message);
           }
         }
         db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(cacheKey, JSON.stringify(finalResults));
@@ -1282,7 +1319,7 @@ app.get('/api/youtube/popular', async (req, res) => {
         const cacheKey = 'ytpopular_' + count;
         const cachedPop2 = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(cacheKey);
         if (cachedPop2) {
-            console.log('WS: youtube populyar keshden');
+            DEBUG_GAME_LOGS && debugGame('WS: youtube populyar keshden');
             return res.json(JSON.parse(cachedPop2.value));
         }
         let results = [];
@@ -1304,7 +1341,7 @@ app.get('/api/youtube/popular', async (req, res) => {
             };
           });
         } catch (ytErr) {
-          console.log('WS: ytsr populyar xetasi - ' + ytErr.message);
+          DEBUG_GAME_LOGS && debugGame('WS: ytsr populyar xetasi - ' + ytErr.message);
         }
         db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(cacheKey, JSON.stringify(results));
         res.json(results);
@@ -1355,16 +1392,16 @@ try {
   let giftPricesRaw2 = require('fs').readFileSync(require('path').join(__dirname, 'gift-prices.json'), 'utf8');
   if (giftPricesRaw2.charCodeAt(0) === 0xFEFF) giftPricesRaw2 = giftPricesRaw2.slice(1);
   GIFT_PRICES = JSON.parse(giftPricesRaw2);
-  console.log('WS: gift-prices.json yuklendi - ' + Object.keys(GIFT_PRICES).length + ' hediyye');
-} catch (e) { console.log('WS: gift-prices.json tapilmadi - ' + e.message); }
+  DEBUG_GAME_LOGS && debugGame('WS: gift-prices.json yuklendi - ' + Object.keys(GIFT_PRICES).length + ' hediyye');
+} catch (e) { DEBUG_GAME_LOGS && debugGame('WS: gift-prices.json tapilmadi - ' + e.message); }
 let ACHIEVEMENTS = {};
 try {
   let assetsRaw = require('fs').readFileSync(require('path').join(__dirname, 'game-assets', 'assets.json'), 'utf8');
   if (assetsRaw.charCodeAt(0) === 0xFEFF) assetsRaw = assetsRaw.slice(1);
   const assetsData = JSON.parse(assetsRaw);
   ACHIEVEMENTS = assetsData.achievement || {};
-  console.log('WS: achievements yuklendi - ' + Object.keys(ACHIEVEMENTS).length + ' dene');
-} catch (e) { console.log('WS: assets.json (achievements) tapilmadi - ' + e.message); }
+  DEBUG_GAME_LOGS && debugGame('WS: achievements yuklendi - ' + Object.keys(ACHIEVEMENTS).length + ' dene');
+} catch (e) { DEBUG_GAME_LOGS && debugGame('WS: assets.json (achievements) tapilmadi - ' + e.message); }
 const BANNED_WORDS = ['sik','sikim','sikeyim','siktir','sikdir','yarrag','yarraq','yarrağ','amcik','amciq','amcık','orospu','orospucocugu','qehbe','qehbeler','qahbe','pic','pici','got','goted','gotveren','gotverin','ana sikim','anani','ananiseks','bacini','bacinisik','kopoglu','qancig','qanciq','fahişe','fahishe','malaka','suka','blyad','pidor','xuy','ebun','pizda','mudak','gandon','siktim','siktimin','yavshaq','yavşaq','deyyus','dəyyus','ipne','ibne','pezevenk','sittirolim','amina','amina qoyim','amina qoyum','anani sikim','bok','boq','gotu','gotoglan'];
 function normalizeForFilter(text) {
   return (text || '').toLowerCase()
@@ -1383,35 +1420,35 @@ function containsPhoneNumber(text) {
   return /\d{7,}/.test(cleaned);
 }
 const userIdToWs = new Map();
+const activityTracker = new ActivityTracker();
+const gameGiftRate = new Map();
+const updateActivity = db.prepare('UPDATE users SET daily_active_seconds = CASE WHEN daily_active_date = ? THEN COALESCE(daily_active_seconds, 0) + ? ELSE ? END, claimed_hour_milestones = CASE WHEN daily_active_date = ? THEN claimed_hour_milestones ELSE ? END, daily_active_date = ? WHERE id = ?');
+const activityTimer = setInterval(() => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    for (const [id, times] of gameGiftRate) if (Date.now() - times[times.length - 1] >= 2000) gameGiftRate.delete(id);
+    activityTracker.flush((id, seconds) => updateActivity.run(today, seconds, seconds, today, '', today, id));
+  } catch (_) { console.error('activity: update_failed'); }
+}, 60000);
+activityTimer.unref();
 const lastRoomByUserId = new Map();
 const server = http.createServer(app);
 
 // ===== Ozel WebSocket server (JSONSocket protokolu ucun) =====
 const wss = new WebSocket.Server({ server, path: '/ws/' });
 const wsPingInterval = setInterval(() => {
-  wss.clients.forEach((client) => {
-    if (client.isAlive === false) {
-      client.missedPings = (client.missedPings || 0) + 1;
-      if (client.missedPings >= 2) {
-        console.log('WS: 2 ardicil ping cavabsiz, baglanti bagladi');
-        return client.terminate();
-      }
-    } else {
-      client.missedPings = 0;
-    }
-    client.isAlive = false;
-    client.ping();
-  });
+  wss.clients.forEach(heartbeat);
   liveStreamsMap.forEach((s, streamId) => {
     const host = s.seats.get(s.hostId);
     const hostAlive = Boolean(host && host.ws && host.ws.readyState === 1);
     if (!hostAlive) {
-      console.log('WS: olu canli yayim temizlendi - id=' + streamId);
+      DEBUG_GAME_LOGS && debugGame('WS: olu canli yayim temizlendi - id=' + streamId);
       liveBroadcast(s, { type: 'live_ended', stream_id: streamId });
       liveStreamsMap.delete(streamId);
     }
   });
 }, 25000);
+wss.once('close', () => { clearInterval(wsPingInterval); clearInterval(activityTimer); });
 function addKissLeagueScore(userId, amount) {
   const today = new Date().toISOString().slice(0, 10);
   const row = db.prepare('SELECT daily_kiss_league_points, daily_kiss_league_limit, daily_kiss_limit_date FROM users WHERE id = ?').get(userId);
@@ -1466,8 +1503,8 @@ function addDailyLeagueScore(userId, amount) {
       const selfRow = db.prepare('SELECT id, username, display_name, daily_league_score, avatar_data FROM users WHERE id = ?').get(userId);
       if (selfRow) leagueUsers2.push(selfRow);
     }
-    targetWs.send(encodeMessage({
-      packet: targetWs.packetCounter = (targetWs.packetCounter||1000)+1,
+    sendGame(targetWs, {
+
       type: 'league_start',
       league_state: myScore2 >= 1 ? 'running' : 'idle',
       league: myLeague2,
@@ -1486,7 +1523,7 @@ function addDailyLeagueScore(userId, amount) {
         rank: i + 1,
         photo_url: u.avatar_data ? ('/api/avatar/' + u.id) : ''
       }))
-    }));
+    });
   }
 }async function searchVimeo(query, count) {
   try {
@@ -1504,10 +1541,10 @@ function addDailyLeagueScore(userId, amount) {
       url: item.link,
       provider: 'vimeo'
     }));
-    console.log('WS: vimeo-dan mahni tapildi - ' + query + ' - ' + mapped.length + ' dene');
+    DEBUG_GAME_LOGS && debugGame('WS: vimeo-dan mahni tapildi - ' + query + ' - ' + mapped.length + ' dene');
     return mapped;
   } catch (vimeoErr) {
-    console.log('WS: vimeo axtaris xetasi - ' + vimeoErr.message);
+    DEBUG_GAME_LOGS && debugGame('WS: vimeo axtaris xetasi - ' + vimeoErr.message);
     return [];
   }
 }function encodeMessage(obj) {
@@ -1712,10 +1749,7 @@ function liveLevelBadge(level) {
 
 function liveSend(client, payload) {
   if (!client || client.readyState !== WebSocket.OPEN) return;
-  if (client.bufferedAmount > 1000000) return;
-  client.send(encodeMessage(Object.assign({}, payload, {
-    packet: client.packetCounter = (client.packetCounter || 1000) + 1
-  })));
+  sendGame(client, payload);
 }
 
 function liveBroadcast(stream, payload) {
@@ -1794,13 +1828,10 @@ function findRoomWithSpace() {
 }
 
 function broadcastToRoom(room, excludeWs, msg) {
-  console.log('BROADCAST-DEBUG: type=' + msg.type + ' room=' + room.gameId + ' total_players=' + room.players.size);
+  DEBUG_GAME_LOGS && debugGame('BROADCAST-DEBUG: type=' + msg.type + ' room=' + room.gameId + ' total_players=' + room.players.size);
   room.players.forEach((player, clientWs) => {
     if (clientWs !== excludeWs && clientWs.readyState === WebSocket.OPEN) {
-      if (clientWs.bufferedAmount > 1000000) return;
-      if (!clientWs.packetCounter) clientWs.packetCounter = 1000;
-      msg.packet = clientWs.packetCounter++;
-      clientWs.send(encodeMessage(msg));
+      sendGame(clientWs, msg);
     }
   });
 }
@@ -1820,6 +1851,7 @@ function getNextSeatInRoom(room) {
   return availableSeats[Math.floor(Math.random() * availableSeats.length)];
 }function removePlayerFromRoom(room, ws) {
   if (!room || !room.players.has(ws)) return;
+  clearTimeout(ws.roomLeaveTimer);
   const leftPlayer = room.players.get(ws);
   room.players.delete(ws);
   if (leftPlayer && leftPlayer.id && room.stickedGifts) room.stickedGifts.delete(leftPlayer.id);
@@ -1829,7 +1861,7 @@ function getNextSeatInRoom(room) {
     if (wasInvolved) {
       if (room.bottleTimer) { clearTimeout(room.bottleTimer); room.bottleTimer = null; }
       room.pendingSpin = null;
-      console.log('BOTTLE-DEBUG: masa=' + room.gameId + ' - firlanma legv edildi, oyuncu ayrildi=' + leftPlayer.id);
+      DEBUG_GAME_LOGS && debugGame('BOTTLE-DEBUG: masa=' + room.gameId + ' - firlanma legv edildi, oyuncu ayrildi=' + leftPlayer.id);
       setTimeout(() => startBottleTurn(room), 500);
     }
   }
@@ -1841,8 +1873,8 @@ function startBottleTurn(room) {
   if (players.length < 2) return;
   const hasMale = players.some(x => x.p.male);
   const hasFemale = players.some(x => !x.p.male);
-  console.log('BOTTLE-DEBUG: masa=' + room.gameId + ' oyuncular=' + JSON.stringify(players.map(x => ({id: x.p.id, name: x.p.name, male: x.p.male}))) + ' hasMale=' + hasMale + ' hasFemale=' + hasFemale);
-  if (!hasMale || !hasFemale) { console.log('BOTTLE-DEBUG: masa=' + room.gameId + ' - DAYANDI, iki cins yoxdur'); return; }
+  DEBUG_GAME_LOGS && debugGame('BOTTLE-DEBUG: masa=' + room.gameId + ' oyuncular=' + JSON.stringify(players.map(x => ({id: x.p.id, name: x.p.name, male: x.p.male}))) + ' hasMale=' + hasMale + ' hasFemale=' + hasFemale);
+  if (!hasMale || !hasFemale) { DEBUG_GAME_LOGS && debugGame('BOTTLE-DEBUG: masa=' + room.gameId + ' - DAYANDI, iki cins yoxdur'); return; }
   const sortedPlayers = players.slice().sort((a, b) => a.p.seat - b.p.seat);
   let nextIdx = 0;
   if (room.lastActiveSeat !== undefined) {
@@ -1854,7 +1886,7 @@ function startBottleTurn(room) {
   room.lastActiveSeat = active.p.seat;
   room.lastActiveId = active.p.id;
   broadcastToRoom(room, null, { type: 'game_turn_offer', user: { id: active.p.id, name: active.p.name } });
-  console.log('BOTTLE: turn_offer gonderildi - ' + new Date().toISOString());
+  DEBUG_GAME_LOGS && debugGame('BOTTLE: turn_offer gonderildi - ' + new Date().toISOString());
   room.pendingSpin = { active, players, activeIdx };
   const finishSpin = () => {
     if (!room.pendingSpin) return;
@@ -1864,7 +1896,7 @@ function startBottleTurn(room) {
     if (others.length === 0) return;
     const passive = others[Math.floor(Math.random() * others.length)];
     broadcastToRoom(room, null, { type: 'game_turn', active: { id: active.p.id, name: active.p.name }, user: { id: passive.p.id, name: passive.p.name } });
-    console.log('BOTTLE: game_turn gonderildi - ' + new Date().toISOString());
+    DEBUG_GAME_LOGS && debugGame('BOTTLE: game_turn gonderildi - ' + new Date().toISOString());
     room.bottleTimer = setTimeout(() => {
       room.bottleTimer = null;
       startBottleTurn(room);
@@ -1874,28 +1906,31 @@ function startBottleTurn(room) {
   room.bottleTimer = setTimeout(finishSpin, 5000);
 }
 wss.on('connection', (ws, req) => {
-  ws.isAlive = true;
-  ws.missedPings = 0;
-  ws.on('pong', () => { ws.isAlive = true; ws.missedPings = 0; });
+  markPong(ws);
+  ws.on('pong', () => markPong(ws));
+  ws.on('error', () => { ws.disconnectCause = 'transport_error'; });
+  ws.on('close', (code, reason) => {
+    clearTimeout(ws.reconnectTimer);
+    const knownReasons = new Set(['state_resync', 'replaced_by_new_connection', '']);
+    const reasonText = reason ? reason.toString() : '';
+    console.info('WS: close', { code, reason: knownReasons.has(reasonText) ? reasonText : '[peer reason omitted]',
+      cause: ws.disconnectCause || '', user: ws.userId || null,
+      room: ws.gameRoom ? ws.gameRoom.gameId : (ws.lastGameRoomId || null), missedPings: ws.missedPings || 0,
+      lastPongAgeMs: Date.now() - ws.lastPongAt, bufferedAmount: ws.bufferedAmount });
+  });
 
   var allowedOrigins = ALLOWED_ORIGINS;
   var requestOrigin = String(req.headers.origin || '');
   var sameOrigin = false;
   try { sameOrigin = Boolean(requestOrigin) && new URL(requestOrigin).host === String(req.headers.host || ''); } catch (_) {}
   if (!sameOrigin && (!requestOrigin || allowedOrigins.indexOf(requestOrigin) < 0)) {
-    console.log('WS: yad domenden qosulma redd edildi - ' + req.headers.origin);
+    DEBUG_GAME_LOGS && debugGame('WS: yad domenden qosulma redd edildi - ' + req.headers.origin);
     ws.close();
     return;
   }
-  console.log('WS: yeni qo■ulma');
+  DEBUG_GAME_LOGS && debugGame('WS: yeni qo■ulma');
 
   let wsUser = null;
-  const activityInterval = setInterval(() => {
-    if (wsUser) {
-      const todayAct = new Date().toISOString().slice(0, 10);
-      db.prepare('UPDATE users SET daily_active_seconds = CASE WHEN daily_active_date = ? THEN daily_active_seconds + 60 ELSE 60 END, claimed_hour_milestones = CASE WHEN daily_active_date = ? THEN claimed_hour_milestones ELSE ? END, daily_active_date = ? WHERE id = ?').run(todayAct, todayAct, '', todayAct, wsUser.id);
-    }
-  }, 60000);
 
   try {
     const cookies = parseCookies(req.headers.cookie);
@@ -1903,14 +1938,14 @@ wss.on('connection', (ws, req) => {
     if (token) {
       const decoded = jwt.verify(token, JWT_SECRET);
       wsUser = db.prepare('SELECT * FROM users WHERE id = ?').get(decoded.id || decoded.userId);
-      console.log('WS: istifadeci tanindi -', wsUser ? wsUser.username : 'tapilmadi');
+      if (wsUser) ws.userId = wsUser.id;
+      DEBUG_GAME_LOGS && debugGame('WS: istifadeci tanindi -', wsUser ? wsUser.username : 'tapilmadi');
       if (wsUser && wsUser.is_banned) {
-        console.log('WS: banli istifadeci qosulma cehdi - ' + wsUser.username);
-        ws.send(encodeMessage({ type: 'error', error: 'banned', packet: 1 }));
-        clearInterval(activityInterval);
+        DEBUG_GAME_LOGS && debugGame('WS: banli istifadeci qosulma cehdi - ' + wsUser.username);
+        sendGame(ws, { type: 'error', error: 'banned', });
         ws.close();
         return;
-      }      if (wsUser) userIdToWs.set(wsUser.id, ws);
+      }      if (wsUser) { ws.userId = wsUser.id; userIdToWs.set(wsUser.id, ws); activityTracker.add(wsUser.id, ws); }
       if (wsUser) {
         const todayCheck = new Date().toISOString().slice(0, 10);
         if (wsUser.daily_league_date && wsUser.daily_league_date !== todayCheck) {
@@ -1923,7 +1958,7 @@ wss.on('connection', (ws, req) => {
               const nextTier = tierOrder[currentIdx + 1];
               db.prepare('UPDATE users SET league_tier = ? WHERE id = ?').run(nextTier, wsUser.id);
               wsUser.league_tier = nextTier;
-              console.log('WS: gunun qalibi yuksek liqaya kecdi - ' + wsUser.username + ' - ' + myTier + ' -> ' + nextTier);
+              DEBUG_GAME_LOGS && debugGame('WS: gunun qalibi yuksek liqaya kecdi - ' + wsUser.username + ' - ' + myTier + ' -> ' + nextTier);
               const leagueFrameMap = { marble: 'silver', silver: 'gold', gold: 'platinum', platinum: 'amber', amber: 'amethyst', amethyst: 'topaz', topaz: 'pearls', pearls: 'sapphire', sapphire: 'ruby', ruby: 'emerald', emerald: 'diamond' };
               if (leagueFrameMap[nextTier]) {
                 const frameName = leagueFrameMap[nextTier];
@@ -1934,14 +1969,14 @@ wss.on('connection', (ws, req) => {
                 }
                 ownedItemsLg[frameName] = true;
                 db.prepare('UPDATE users SET owned_items = ? WHERE id = ?').run(JSON.stringify(ownedItemsLg), wsUser.id);
-                console.log('WS: liqa cercivesi verildi - ' + wsUser.username + ' - ' + frameName);
+                DEBUG_GAME_LOGS && debugGame('WS: liqa cercivesi verildi - ' + wsUser.username + ' - ' + frameName);
               }            }
           }
         }
       }
     }
   } catch (e) {
-    console.log('WS: token yoxlama xetasi -', e.message);
+    DEBUG_GAME_LOGS && debugGame('WS: token yoxlama xetasi -', e.message);
   }
 
 
@@ -1949,7 +1984,7 @@ wss.on('connection', (ws, req) => {
     try {
       const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
       const msg = decodeMessage(buffer);
-      console.log('WS RECV:', JSON.stringify(msg));
+      DEBUG_GAME_LOGS && debugGame('WS RECV type:', typeof msg.type === 'string' ? msg.type.slice(0, 64) : 'invalid');
 
       if (['start_pk', 'respond_pk', 'invite_to_live', 'respond_to_invite', 'request_live_seat'].includes(msg.type)) {
         liveSend(ws, { type: 'live_feature_unavailable', message: 'Yaxında işləyəcək' });
@@ -2044,7 +2079,7 @@ wss.on('connection', (ws, req) => {
         return;
       }
       if (msg.type === 'game_refuse') {
-        console.log('GAME-REFUSE-TAPILDI!!! wsUser=' + Boolean(wsUser) + ' gameRoom=' + Boolean(ws.gameRoom));
+        DEBUG_GAME_LOGS && debugGame('GAME-REFUSE-TAPILDI!!! wsUser=' + Boolean(wsUser) + ' gameRoom=' + Boolean(ws.gameRoom));
         if (ws.gamePlayer) {
           msg.user = { id: ws.gamePlayer.id, name: ws.gamePlayer.name, male: ws.gamePlayer.male, vip: ws.gamePlayer.vip, pass_premium: ws.gamePlayer.pass_premium, top: ws.gamePlayer.top, photo_url: ws.gamePlayer.photo_url };
         }
@@ -2057,7 +2092,7 @@ wss.on('connection', (ws, req) => {
         }
         if (ws.gameRoom) {
           broadcastToRoom(ws.gameRoom, null, msg);
-          console.log('GAME-REFUSE-BROADCAST-EDILDI');
+          DEBUG_GAME_LOGS && debugGame('GAME-REFUSE-BROADCAST-EDILDI');
         }
         return;
       }
@@ -2097,7 +2132,7 @@ wss.on('connection', (ws, req) => {
                   const bId = bItem.id; const bCount = Number(bItem.count) || 1;
                   ownedItemsBst[bId] = (Number(ownedItemsBst[bId]) || 0) + bCount;
                 });
-              } catch (e) { console.log('WS: booster json parse xetasi - ' + e.message); }
+              } catch (e) { DEBUG_GAME_LOGS && debugGame('WS: booster json parse xetasi - ' + e.message); }
               db.prepare('UPDATE users SET owned_items = ? WHERE id = ?').run(JSON.stringify(ownedItemsBst), wsUser.id);
             } else if (rewardType === 'boosters_multi' && rewardBoostersJson) {
               const ownedRowBm = db.prepare('SELECT owned_items FROM users WHERE id = ?').get(wsUser.id);
@@ -2108,33 +2143,32 @@ wss.on('connection', (ws, req) => {
                 idList.forEach(bId => {
                   ownedItemsBm[bId] = (Number(ownedItemsBm[bId]) || 0) + 1;
                 });
-              } catch (e) { console.log('WS: boosters_multi json parse xetasi - ' + e.message); }
+              } catch (e) { DEBUG_GAME_LOGS && debugGame('WS: boosters_multi json parse xetasi - ' + e.message); }
               db.prepare('UPDATE users SET owned_items = ? WHERE id = ?').run(JSON.stringify(ownedItemsBm), wsUser.id);
             }
-            console.log('WS: pass mukafati alindi - ' + wsUser.username + ' level=' + msg.level + ' line=' + msg.line + ' type=' + rewardType);
+            DEBUG_GAME_LOGS && debugGame('WS: pass mukafati alindi - ' + wsUser.username + ' level=' + msg.level + ' line=' + msg.line + ' type=' + rewardType);
           }
-          ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'pass_claim_level_reward', level: msg.level, line: msg.line, reward: { gold: msg.line === 'paid' ? (rewardRow ? rewardRow.paid_gold : 0) : (rewardRow ? rewardRow.free_gold : 0) } }));
+          sendGame(ws, {  type: 'pass_claim_level_reward', level: msg.level, line: msg.line, reward: { gold: msg.line === 'paid' ? (rewardRow ? rewardRow.paid_gold : 0) : (rewardRow ? rewardRow.free_gold : 0) } });
         }
         return;
       }      if (!msg.type) {
-        if (!ws.packetCounter) ws.packetCounter = 1000;
         if (msg.registration && wsUser) {
           const genderVal = msg.male ? 'male' : 'female';
           db.prepare('UPDATE users SET gender = ?, display_name = ?, game_registered = 1, updated_at = datetime(\'now\') WHERE id = ?')
             .run(genderVal, msg.name || wsUser.username, wsUser.id);
           wsUser = db.prepare('SELECT * FROM users WHERE id = ?').get(wsUser.id);
-          console.log('WS: qeydiyyat tamamlandi - ' + wsUser.username + ' gender=' + genderVal);
+          DEBUG_GAME_LOGS && debugGame('WS: qeydiyyat tamamlandi - ' + wsUser.username + ' gender=' + genderVal);
         } else if (wsUser && !wsUser.game_registered && !wsUser.google_id && !wsUser.facebook_id && !wsUser.telegram_id) {
           const needsRegResponse = {
             type: 'needs_registration',
-            packet: ws.packetCounter++,
+
             name: wsUser.username
           };
-          ws.send(encodeMessage(needsRegResponse));
-          console.log('WS SENT: needs_registration response');
+          sendGame(ws, needsRegResponse);
+          DEBUG_GAME_LOGS && debugGame('WS SENT: needs_registration response');
           return;
         }
-      console.log('WS: DEBUG login tokens - wsUser.tokens=' + (wsUser ? wsUser.tokens : 'wsUser_null') + ' wsUser.id=' + (wsUser ? wsUser.id : 'null'));
+      DEBUG_GAME_LOGS && debugGame('WS: DEBUG login tokens - wsUser.tokens=' + (wsUser ? wsUser.tokens : 'wsUser_null') + ' wsUser.id=' + (wsUser ? wsUser.id : 'null'));
       const pendingHaremNotifs = wsUser ? db.prepare('SELECT * FROM harem_inbox WHERE user_id = ? AND delivered = 0').all(wsUser.id) : [];
       const haremInboxItems = pendingHaremNotifs.map(function(n) {
         const targetU = db.prepare('SELECT * FROM users WHERE id = ?').get(n.target_id);
@@ -2152,11 +2186,11 @@ wss.on('connection', (ws, req) => {
       });
       if (wsUser && pendingHaremNotifs.length > 0) {
         db.prepare('UPDATE harem_inbox SET delivered = 1 WHERE user_id = ?').run(wsUser.id);
-        console.log('WS: ' + pendingHaremNotifs.length + ' herem bildirisi gonderildi - user=' + wsUser.id);
+        DEBUG_GAME_LOGS && debugGame('WS: ' + pendingHaremNotifs.length + ' herem bildirisi gonderildi - user=' + wsUser.id);
       }
       const loginResponse = {
         type: 'login',
-        packet: ws.packetCounter++,
+
         abtest: { kickout: true },
         kickout_info: { price: 60, refresh_ms: 60000 },
         league_state: 'active',
@@ -2195,7 +2229,7 @@ wss.on('connection', (ws, req) => {
         harem: [],
         friends: [],
         blocked: []
-      };ws.send(encodeMessage(loginResponse));
+      };sendGame(ws, loginResponse);
 if (wsUser) {
         const todayLg = new Date().toISOString().slice(0, 10);
         const scoreRowLg = db.prepare('SELECT daily_league_score, daily_league_date, league_tier FROM users WHERE id = ?').get(wsUser.id);
@@ -2208,8 +2242,8 @@ if (wsUser) {
           const selfRowLg = db.prepare('SELECT id, username, display_name, daily_league_score, avatar_data FROM users WHERE id = ?').get(wsUser.id);
           if (selfRowLg) leagueUsersLg.push(selfRowLg);
         }
-        ws.send(encodeMessage({
-          packet: ws.packetCounter++,
+        sendGame(ws, {
+
           type: 'league_start',
           league_state: myScoreLg >= 1 ? 'running' : 'idle',
           league: myLeagueLg,
@@ -2229,10 +2263,10 @@ if (wsUser) {
             rank: i + 1,
             photo_url: u.avatar_data ? ('/api/avatar/' + u.id) : ''
           }))
-        }));
+        });
       }
-            console.log('WS SENT: login response');
-      console.log('WS DEBUG: wsUser movcuddurmu = ' + Boolean(wsUser) + ' id=' + (wsUser ? wsUser.id : 'YOXDUR'));
+            DEBUG_GAME_LOGS && debugGame('WS SENT: login response');
+      DEBUG_GAME_LOGS && debugGame('WS DEBUG: wsUser movcuddurmu = ' + Boolean(wsUser) + ' id=' + (wsUser ? wsUser.id : 'YOXDUR'));
       if (wsUser) {
         const today = new Date().toISOString().slice(0, 10);
         const lastClaim = db.prepare('SELECT value FROM app_settings WHERE key = ?').get('daily_bonus_claim_' + wsUser.id);
@@ -2241,46 +2275,48 @@ if (wsUser) {
           const goldAmount = dayNum;
           db.prepare('UPDATE users SET coins = coins + ? WHERE id = ?').run(goldAmount, wsUser.id);
           db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('daily_bonus_claim_' + wsUser.id, today);
-          ws.send(encodeMessage({
-            packet: ws.packetCounter = (ws.packetCounter||1000)+1,
+          sendGame(ws, {
+
             type: 'gold_daily',
             day: dayNum,
             gold_diff: goldAmount
-          }));
-          console.log('WS SENT: gold_daily - day=' + dayNum + ' gold=' + goldAmount);
+          });
+          DEBUG_GAME_LOGS && debugGame('WS SENT: gold_daily - day=' + dayNum + ' gold=' + goldAmount);
         }
       }
       const myId = wsUser ? String(wsUser.id) : ('guest_' + Math.random().toString(36).slice(2, 8));
       const myName = wsUser ? (wsUser.display_name || wsUser.username) : 'Oyuncu';
       const myMale = !wsUser || wsUser.gender !== 'female';
-      if (myId) {
+      let resumedRoom = null;
+      if (wsUser) {
         for (const oldRoom of rooms.values()) {
-          for (const [oldWs, oldPlayer] of oldRoom.players.entries()) {
-            if (oldPlayer.id === myId && oldWs !== ws) {
-              oldRoom.players.delete(oldWs);
-              if (oldRoom.stickedGifts) oldRoom.stickedGifts.delete(myId);
-              broadcastToRoom(oldRoom, oldWs, { type: 'game_leave', user: { id: myId } });
+          for (const [oldWs, oldPlayer] of oldRoom.players) {
+            if (oldPlayer.id !== myId || oldWs === ws) continue;
+            if (isKickedFromRoom(wsUser.id, oldRoom.gameId)) continue;
+            if (replaceRoomSocket(oldRoom, oldWs, ws)) {
+              resumedRoom = oldRoom;
               if (oldWs.readyState === WebSocket.OPEN) {
-                oldWs.send(encodeMessage({ type: 'other_client_shutdown', packet: oldWs.packetCounter = (oldWs.packetCounter||1000)+1 }));
+                sendGame(oldWs, { type: 'other_client_shutdown' });
                 oldWs.close(4001, 'replaced_by_new_connection');
               }
-              console.log('WS: kohne xeyal nusxe silindi - ' + myId);
+              break;
             }
           }
+          if (resumedRoom) break;
         }
       }
-      let myRoom = null;
-      if (myId && lastRoomByUserId.has(myId)) {
+      let myRoom = resumedRoom;
+      if (!myRoom && myId && lastRoomByUserId.has(myId)) {
         const oldRoomId = lastRoomByUserId.get(myId);
         const oldRoomRef = rooms.get(oldRoomId);
         if (oldRoomRef && oldRoomRef.players.size < MAX_SEATS) {
           myRoom = oldRoomRef;
-          console.log('WS: eyni otaga qaytarildi - ' + myId + ' masa=' + oldRoomId);
+          DEBUG_GAME_LOGS && debugGame('WS: eyni otaga qaytarildi - ' + myId + ' masa=' + oldRoomId);
         }
       }
       if (!myRoom) myRoom = findRoomWithSpace();
-      console.log('ROOM-DEBUG: myId=' + myId + ' hasLastRoom=' + (myId ? lastRoomByUserId.has(myId) : 'no-myid') + ' finalRoomId=' + myRoom.gameId + ' chatHistLen=' + (myRoom.chatHistory ? myRoom.chatHistory.length : 0));
-      const mySeat = getNextSeatInRoom(myRoom);
+      DEBUG_GAME_LOGS && debugGame('ROOM-DEBUG: myId=' + myId + ' hasLastRoom=' + (myId ? lastRoomByUserId.has(myId) : 'no-myid') + ' finalRoomId=' + myRoom.gameId + ' chatHistLen=' + (myRoom.chatHistory ? myRoom.chatHistory.length : 0));
+      const mySeat = resumedRoom ? ws.gamePlayer.seat : getNextSeatInRoom(myRoom);
       const top10KissIdsGE = db.prepare('SELECT id FROM users WHERE total_kisses > 0 ORDER BY total_kisses DESC LIMIT 10').all().map(function(r) { return r.id; });
       const top10DjIdsGE = db.prepare('SELECT id FROM users WHERE points > 0 ORDER BY points DESC LIMIT 10').all().map(function(r) { return r.id; });
       const top10PriceIdsGE = db.prepare('SELECT id FROM users WHERE price_stat > 0 ORDER BY price_stat DESC LIMIT 10').all().map(function(r) { return r.id; });
@@ -2295,7 +2331,7 @@ if (wsUser) {
         myLeagueMP = tierOrderListMP.indexOf(tierNameMP);
         if (myLeagueMP < 1) myLeagueMP = 1;
       }
-      const myPlayer = { id: myId, name: myName, male: myMale, photo_url: wsUser && wsUser.avatar_data ? ('/api/avatar/' + wsUser.id) : '', seat: mySeat, kisses: 0, vip: wsUser ? Boolean(wsUser.is_vip) : false, pass_premium: wsUser ? Boolean(wsUser.is_vip) : false, top: myIsTop, frame: wsUser ? (wsUser.active_frame || '') : '', stone: wsUser ? (wsUser.active_stone || '') : '', league: myLeagueMP };
+      const myPlayer = resumedRoom ? ws.gamePlayer : { id: myId, name: myName, male: myMale, photo_url: wsUser && wsUser.avatar_data ? ('/api/avatar/' + wsUser.id) : '', seat: mySeat, kisses: 0, vip: wsUser ? Boolean(wsUser.is_vip) : false, pass_premium: wsUser ? Boolean(wsUser.is_vip) : false, top: myIsTop, frame: wsUser ? (wsUser.active_frame || '') : '', stone: wsUser ? (wsUser.active_stone || '') : '', league: myLeagueMP };
       if (myId && myRoom.stickedGifts.has(myId)) {
         const savedGifts = myRoom.stickedGifts.get(myId);
         if (savedGifts.ava_gift) { myPlayer.ava_gift = savedGifts.ava_gift; myPlayer.ava_gift_random = savedGifts.ava_gift_random; }
@@ -2303,9 +2339,9 @@ if (wsUser) {
         if (savedGifts.drink) myPlayer.drink = savedGifts.drink;
       }
       const existingParticipants = [];
-      myRoom.players.forEach(p => existingParticipants.push(p));
+      myRoom.players.forEach((p, memberWs) => { if (memberWs !== ws) existingParticipants.push(p); });
       if (wsUser && isKickedFromRoom(wsUser.id, myRoom.gameId)) {
-        ws.send(encodeMessage({ type: 'kickout_info', kickout_ts: wsUser.kicked_until, packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+        sendGame(ws, { type: 'kickout_info', kickout_ts: wsUser.kicked_until, });
         return;
       }
       myRoom.players.set(ws, myPlayer);
@@ -2315,27 +2351,27 @@ if (wsUser) {
       ws.gameRoom = myRoom;
       const gameEnterResponse = {
         type: 'game_enter',
-        packet: ws.packetCounter++,
+
         game_id: myRoom.gameId,
         bottle_type: myRoom.bottleType || 'vipbottle',
-        participants: [myPlayer, ...existingParticipants],
+        participants: [myPlayer, ...existingParticipants].map(player => ({ ...player, ...(myRoom.stickedGifts.get(player.id) || {}) })),
         abtest: { kickout: true },
         kickout_info: { price: 60, refresh_ms: 60000 }
       };
-      ws.send(encodeMessage(gameEnterResponse));
-      console.log('WS SENT: game_enter response - masa: ' + myRoom.gameId + ' oyuncu sayi: ' + myRoom.players.size);
-      broadcastToRoom(myRoom, ws, {
+      sendGame(ws, gameEnterResponse);
+      DEBUG_GAME_LOGS && debugGame('WS SENT: game_enter response - masa: ' + myRoom.gameId + ' oyuncu sayi: ' + myRoom.players.size);
+      if (!resumedRoom) broadcastToRoom(myRoom, ws, {
         type: 'game_join',
         user: myPlayer
       });
-      console.log('CHAT-HISTORY-DEBUG: yeni oyuncu qosuldu, room.chatHistory var mi=' + (myRoom.chatHistory ? myRoom.chatHistory.length : 'YOXDUR'));
+      DEBUG_GAME_LOGS && debugGame('CHAT-HISTORY-DEBUG: yeni oyuncu qosuldu, room.chatHistory var mi=' + (myRoom.chatHistory ? myRoom.chatHistory.length : 'YOXDUR'));
       if (myRoom.chatHistory && myRoom.chatHistory.length > 0) {
         const cleanHistory = myRoom.chatHistory.map(function(histMsg) {
           const freshMsg = Object.assign({}, histMsg);
           delete freshMsg.packet;
           return freshMsg;
         });
-        ws.send(encodeMessage({ type: 'game_chat_history', messages: cleanHistory, packet: ws.packetCounter = (ws.packetCounter || 1000) + 1 }));
+        sendGame(ws, { type: 'game_chat_history', messages: cleanHistory, });
       }
       if (myId) {
         existingParticipants.forEach(function(fellow) {
@@ -2345,10 +2381,10 @@ if (wsUser) {
           }
         });
       }
-      console.log('WS: DEBUG cari mahni yoxlama - currentSong=' + (myRoom.currentSong ? 'VAR' : 'YOXDUR') + (myRoom.currentSong ? ' yas=' + ((Date.now() - myRoom.currentSong.start_timestamp) / 1000) : ''));
+      DEBUG_GAME_LOGS && debugGame('WS: DEBUG cari mahni yoxlama - currentSong=' + (myRoom.currentSong ? 'VAR' : 'YOXDUR') + (myRoom.currentSong ? ' yas=' + ((Date.now() - myRoom.currentSong.start_timestamp) / 1000) : ''));
       if (myRoom.currentSong && (Date.now() - myRoom.currentSong.start_timestamp) < ((myRoom.currentSong.duration || 240) * 1000)) {
         const songReplay = Object.assign({}, myRoom.currentSong);
-        console.log('WS: DEBUG yeni qowulana mahni gonderilir - title=' + songReplay.title + ' orig_start=' + myRoom.currentSong.start_timestamp + ' indiki=' + Date.now());
+        DEBUG_GAME_LOGS && debugGame('WS: DEBUG yeni qowulana mahni gonderilir - title=' + songReplay.title + ' orig_start=' + myRoom.currentSong.start_timestamp + ' indiki=' + Date.now());
         const realElapsedSec = (Date.now() - songReplay.start_timestamp) / 1000;
         const safeDuration = (songReplay.duration || 999) - 5;
         if (realElapsedSec > safeDuration) {
@@ -2356,15 +2392,13 @@ if (wsUser) {
         }
         setTimeout(() => {
           if (ws.readyState !== 1) return;
-          if (!ws.packetCounter) ws.packetCounter = 1000;
-          songReplay.packet = ws.packetCounter++;
-          ws.send(encodeMessage(songReplay));
+          sendGame(ws, songReplay);
         }, 1500);
       }
       startBottleTurn(myRoom);      } else if (msg.type === 'gold2tokens_get') {
         const tokensGetResponse = {
           type: 'gold2tokens_get',
-          packet: ws.packetCounter++,
+
           items: [
             { gold: 3, tokens: 3 },
             { gold: 5, tokens: 10 },
@@ -2373,8 +2407,8 @@ if (wsUser) {
             { gold: 180, tokens: 450 }
           ]
         };
-        ws.send(encodeMessage(tokensGetResponse));
-        console.log('WS SENT: gold2tokens_get response');
+        sendGame(ws, tokensGetResponse);
+        DEBUG_GAME_LOGS && debugGame('WS SENT: gold2tokens_get response');
       } else if (msg.type === 'gold2tokens') {
         if (wsUser) {
           const rate = { 3: 3, 5: 10, 10: 25, 30: 75, 180: 450 };
@@ -2385,20 +2419,20 @@ if (wsUser) {
             db.prepare('UPDATE users SET coins = coins - ?, tokens = tokens + ? WHERE id = ?').run(goldSpent, tokensGained, wsUser.id);
             const tokensResponse = {
               type: 'gold2tokens',
-              packet: ws.packetCounter++,
+
               tokens_inc: tokensGained
             };
-            ws.send(encodeMessage(tokensResponse));
-            console.log('WS: token alindi - ' + wsUser.username + ' gold=' + goldSpent + ' tokens=' + tokensGained);
+            sendGame(ws, tokensResponse);
+            DEBUG_GAME_LOGS && debugGame('WS: token alindi - ' + wsUser.username + ' gold=' + goldSpent + ' tokens=' + tokensGained);
             const verifyRow = db.prepare('SELECT id, username, tokens FROM users WHERE id = ?').get(wsUser.id);
-            console.log('WS: DEBUG yazmadan sonra yoxlama - ' + JSON.stringify(verifyRow));
+            DEBUG_GAME_LOGS && debugGame('WS: DEBUG yazmadan sonra yoxlama - ' + JSON.stringify(verifyRow));
           } else {
-            console.log('WS: token alma redd edildi - kifayet qeder coin yoxdur - ' + wsUser.username);
+            DEBUG_GAME_LOGS && debugGame('WS: token alma redd edildi - kifayet qeder coin yoxdur - ' + wsUser.username);
           }
         }
       } else if (msg.type === 'get_profile') {
         const profileUser = db.prepare('SELECT * FROM users WHERE id = ?').get(msg.user_id);
-        console.log('DEBUG-STATUS: user_id=' + msg.user_id + ' status=[' + (profileUser ? profileUser.user_status : 'YOX') + ']');
+        DEBUG_GAME_LOGS && debugGame('DEBUG-STATUS: user_id=' + msg.user_id + ' status=[' + (profileUser ? profileUser.user_status : 'YOX') + ']');
         const top10KissIds = db.prepare('SELECT id FROM users WHERE total_kisses > 0 ORDER BY total_kisses DESC LIMIT 10').all().map(function(r) { return r.id; });
         const top10DjIds = db.prepare('SELECT id FROM users WHERE points > 0 ORDER BY points DESC LIMIT 10').all().map(function(r) { return r.id; });
         const top10PriceIds = db.prepare('SELECT id FROM users WHERE price_stat > 0 ORDER BY price_stat DESC LIMIT 10').all().map(function(r) { return r.id; });
@@ -2434,7 +2468,7 @@ if (wsUser) {
         }
         const profileResponse = {
           type: 'get_profile',
-          packet: ws.packetCounter++,
+
           id: profileUser ? String(profileUser.id) : String(msg.user_id),
           name: profileUser ? (profileUser.display_name || profileUser.username) : 'Oyuncu',
           status: getActiveStatus(profileUser),
@@ -2470,7 +2504,7 @@ if (wsUser) {
           if (ownership2 && ownership2.owner_id) {
             const ownerUser = db.prepare('SELECT * FROM users WHERE id = ?').get(ownership2.owner_id);
             if (ownerUser) {
-              console.log('WS DEBUG: ownerUser avatar_data movcuddurmu = ' + Boolean(ownerUser.avatar_data) + ' id=' + ownerUser.id + ' username=' + ownerUser.username);
+              DEBUG_GAME_LOGS && debugGame('WS DEBUG: ownerUser avatar_data movcuddurmu = ' + Boolean(ownerUser.avatar_data) + ' id=' + ownerUser.id + ' username=' + ownerUser.username);
               profileResponse.owner = {
                 id: String(ownerUser.id),
                 name: ownerUser.display_name || ownerUser.username,
@@ -2481,8 +2515,8 @@ if (wsUser) {
             }
           }
         }
-        ws.send(encodeMessage(profileResponse));
-        console.log('WS SENT: get_profile response');
+        sendGame(ws, profileResponse);
+        DEBUG_GAME_LOGS && debugGame('WS SENT: get_profile response');
       } else if (msg.type === 'compliment_next') {
         let complimentReceiver = null;
         if (ws.gameRoom) {
@@ -2492,7 +2526,7 @@ if (wsUser) {
         }
         const complimentNextResponse = {
           type: 'compliment_next',
-          packet: ws.packetCounter++,
+
           compliments_to_reward: 5,
           compliments_left: 5,
           group_sent: false,
@@ -2501,26 +2535,26 @@ if (wsUser) {
           rewarded: false,
           receiver: complimentReceiver ? { id: complimentReceiver.id, name: complimentReceiver.name, male: complimentReceiver.male, photo_url: complimentReceiver.photo_url } : null
         };
-        ws.send(encodeMessage(complimentNextResponse));
-        console.log('WS SENT: compliment_next response');
+        sendGame(ws, complimentNextResponse);
+        DEBUG_GAME_LOGS && debugGame('WS SENT: compliment_next response');
       } else if (msg.type === 'compliment_send') {
         if (wsUser) {
           db.prepare('UPDATE users SET coins = coins + 2 WHERE id = ?').run(wsUser.id);
-          console.log('WS: kompliment gonderildi - ' + wsUser.username);
+          DEBUG_GAME_LOGS && debugGame('WS: kompliment gonderildi - ' + wsUser.username);
         }
         const complimentSendResponse = {
           type: 'compliment_send',
-          packet: ws.packetCounter++,
+
           success: true
         };
-        ws.send(encodeMessage(complimentSendResponse));
+        sendGame(ws, complimentSendResponse);
       } else if (msg.type === 'compliment_group') {
         const complimentGroupResponse = {
           type: 'compliment_group',
-          packet: ws.packetCounter++,
+
           success: true
         };
-        ws.send(encodeMessage(complimentGroupResponse));
+        sendGame(ws, complimentGroupResponse);
       } else if (msg.type === 'harem_purchase') {
         if (wsUser) {
           const targetUser = db.prepare('SELECT * FROM users WHERE id = ?').get(msg.target_id);
@@ -2529,16 +2563,16 @@ if (wsUser) {
             const currentPrice = ownership ? ownership.price : 10;
             const currentOwnerId = ownership ? ownership.owner_id : null;
             if (currentOwnerId === wsUser.id) {
-              console.log('WS: harem - artiq ozune aiddir - ' + wsUser.username);
+              DEBUG_GAME_LOGS && debugGame('WS: harem - artiq ozune aiddir - ' + wsUser.username);
             } else if (wsUser.coins < currentPrice) {
-              console.log('WS: harem - kifayet qeder coin yoxdur - ' + wsUser.username);
+              DEBUG_GAME_LOGS && debugGame('WS: harem - kifayet qeder coin yoxdur - ' + wsUser.username);
             } else {
               db.prepare('UPDATE users SET coins = coins - ? WHERE id = ?').run(currentPrice, wsUser.id);
               db.prepare('UPDATE users SET price_stat = COALESCE(price_stat, 0) + ? WHERE id = ?').run(currentPrice, wsUser.id);
               db.prepare("INSERT INTO transactions (user_id, type, amount, reason) VALUES (?, 'price_period', ?, 'harem_purchase')").run(wsUser.id, currentPrice);
               if (currentOwnerId && currentOwnerId !== wsUser.id) {
                 db.prepare('UPDATE users SET price_stat = MAX(0, COALESCE(price_stat, 0) - ?) WHERE id = ?').run(currentPrice, currentOwnerId);
-                console.log('WS: evvelki sahibden xal cixarildi - id=' + currentOwnerId + ' -' + currentPrice);
+                DEBUG_GAME_LOGS && debugGame('WS: evvelki sahibden xal cixarildi - id=' + currentOwnerId + ' -' + currentPrice);
               }
               db.prepare('UPDATE users SET harem_price_stat = ? WHERE id = ?').run(currentPrice, targetUser.id);
               const nextPrice = currentPrice + 1;
@@ -2546,11 +2580,11 @@ if (wsUser) {
               const oldOwner = currentOwnerId ? db.prepare('SELECT * FROM users WHERE id = ?').get(currentOwnerId) : null;
               if (currentOwnerId && !userIdToWs.has(currentOwnerId)) {
                 db.prepare('INSERT INTO harem_inbox (user_id, target_id, new_owner_id, old_owner_id, price, ts, delivered) VALUES (?, ?, ?, ?, ?, ?, 0)').run(currentOwnerId, targetUser.id, wsUser.id, currentOwnerId, nextPrice, Date.now());
-                console.log('WS: oflayn herem bildirisi yazildi - user=' + currentOwnerId);
+                DEBUG_GAME_LOGS && debugGame('WS: oflayn herem bildirisi yazildi - user=' + currentOwnerId);
               }
               const haremResponse = {
                 type: 'harem_purchase',
-                packet: ws.packetCounter++,
+
                 ts: Date.now(),
                 price: nextPrice,
                 price_rank: 1,
@@ -2558,8 +2592,8 @@ if (wsUser) {
                 new_owner: { id: String(wsUser.id), name: wsUser.display_name || wsUser.username, male: wsUser.gender !== 'female', photo_url: wsUser.avatar_data ? ('/api/avatar/' + wsUser.id) : '' },
                 old_owner: oldOwner ? { id: String(oldOwner.id), name: oldOwner.display_name || oldOwner.username, male: oldOwner.gender !== 'female', photo_url: oldOwner.avatar_data ? ('/api/avatar/' + oldOwner.id) : '' } : null
               };
-              if (ws.gameRoom) { broadcastToRoom(ws.gameRoom, null, haremResponse); } else { ws.send(encodeMessage(haremResponse)); }
-              console.log('WS SENT: harem_purchase - ' + wsUser.username + ' -> ' + targetUser.username + ' qiymet=' + currentPrice);
+              if (ws.gameRoom) { broadcastToRoom(ws.gameRoom, null, haremResponse); } else { sendGame(ws, haremResponse); }
+              DEBUG_GAME_LOGS && debugGame('WS SENT: harem_purchase - ' + wsUser.username + ' -> ' + targetUser.username + ' qiymet=' + currentPrice);
             }
           }
         }
@@ -2574,35 +2608,35 @@ if (wsUser) {
           const seasonStart2 = seasonStartRow2 ? Number(seasonStartRow2.value) : Date.now();
           const alreadyHas = db.prepare('SELECT id FROM pass_purchases WHERE user_id = ? AND season_start_ms = ?').get(wsUser.id, seasonStart2);
           if (alreadyHas) {
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'premium_pass_error', reason: 'already_active' }));
+            sendGame(ws, {  type: 'premium_pass_error', reason: 'already_active' });
           } else {
             const currentUser2 = db.prepare('SELECT crystals FROM users WHERE id = ?').get(wsUser.id);
             if (currentUser2.crystals < 500) {
-              ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'premium_pass_error', reason: 'not_enough_crystals' }));
+              sendGame(ws, {  type: 'premium_pass_error', reason: 'not_enough_crystals' });
             } else {
               db.prepare('UPDATE users SET crystals = crystals - 500 WHERE id = ?').run(wsUser.id);
               db.prepare('INSERT INTO pass_purchases (user_id, season_start_ms) VALUES (?, ?) ON CONFLICT(user_id, season_start_ms) DO NOTHING').run(wsUser.id, seasonStart2);
-              ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'premium_pass_purchased' }));
-              console.log('WS: premium pass alindi - ' + wsUser.username);
+              sendGame(ws, {  type: 'premium_pass_purchased' });
+              DEBUG_GAME_LOGS && debugGame('WS: premium pass alindi - ' + wsUser.username);
             }
           }
         }
       } else if (msg.type === 'get_favorite_songs') {
         const favSongsResponse = {
           type: 'favorite_songs',
-          packet: ws.packetCounter++,
+
           folder: msg.folder,
           song_ids: [],
           max_items: 30
         };
-        ws.send(encodeMessage(favSongsResponse));
-        console.log('WS SENT: get_favorite_songs response - ' + msg.folder);
+        sendGame(ws, favSongsResponse);
+        DEBUG_GAME_LOGS && debugGame('WS SENT: get_favorite_songs response - ' + msg.folder);
       } else if (msg.type === 'item_purchase') {
         if (wsUser && msg.item) {
           const ITEM_PRICE = 500;
           const validFrames = ['amber','amethyst','angel','carameldecor','cardsdecor','chipsdecor','cinemadecor','daydecor','demon','diamond','discodecor','eastdecor','egyptdecor','emerald','fruitjellydecor','gold','greendecor','hatreddecor','heartsdecor','icedecor','kissesdecor','lavadecor','lovedecor','marsdecor','naturedecor','nightdecor','romedecor','rockdecor','stonedecor','theatredecor','tourismdecor','turbodecor','venusdecor','violetdecor','westdecor'];
           if (validFrames.indexOf(msg.item) < 0) {
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'item_purchase_error', reason: 'invalid_item' }));
+            sendGame(ws, {  type: 'item_purchase_error', reason: 'invalid_item' });
           } else {
             const currentUserRow = db.prepare('SELECT coins, owned_items FROM users WHERE id = ?').get(wsUser.id);
             let ownedObj = {};
@@ -2610,16 +2644,16 @@ if (wsUser) {
               try { ownedObj = JSON.parse(currentUserRow.owned_items); } catch (e) {}
             }
             if (ownedObj[msg.item]) {
-              ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'item_purchase', item: msg.item }));
-              console.log('WS: element artiq movcuddur - ' + wsUser.username + ' - ' + msg.item);
+              sendGame(ws, {  type: 'item_purchase', item: msg.item });
+              DEBUG_GAME_LOGS && debugGame('WS: element artiq movcuddur - ' + wsUser.username + ' - ' + msg.item);
             } else if (currentUserRow.coins < ITEM_PRICE) {
-              ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'item_purchase_error', reason: 'insufficient_coins' }));
-              console.log('WS: element alisi reddedildi - kifayet qeder coin yoxdur - ' + wsUser.username);
+              sendGame(ws, {  type: 'item_purchase_error', reason: 'insufficient_coins' });
+              DEBUG_GAME_LOGS && debugGame('WS: element alisi reddedildi - kifayet qeder coin yoxdur - ' + wsUser.username);
             } else {
               ownedObj[msg.item] = true;
               db.prepare('UPDATE users SET coins = coins - ?, owned_items = ? WHERE id = ?').run(ITEM_PRICE, JSON.stringify(ownedObj), wsUser.id);
-              ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'item_purchase', item: msg.item }));
-              console.log('WS: cerceve alindi - ' + wsUser.username + ' - ' + msg.item);
+              sendGame(ws, {  type: 'item_purchase', item: msg.item });
+              DEBUG_GAME_LOGS && debugGame('WS: cerceve alindi - ' + wsUser.username + ' - ' + msg.item);
             }
           }
         }} else if (msg.type === 'set_decorations') {
@@ -2633,10 +2667,10 @@ if (wsUser) {
           }
           if (frameVal === '' || ownedCheck[frameVal]) {
             db.prepare('UPDATE users SET active_frame = ?, active_stone = ? WHERE id = ?').run(frameVal, stoneVal, wsUser.id);
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'update_user', user_id: String(wsUser.id), frame: frameVal, stone: stoneVal }));
-            console.log('WS: dekorasiya deyisdirildi - ' + wsUser.username + ' - frame=' + frameVal + ' stone=' + stoneVal);
+            sendGame(ws, {  type: 'update_user', user_id: String(wsUser.id), frame: frameVal, stone: stoneVal });
+            DEBUG_GAME_LOGS && debugGame('WS: dekorasiya deyisdirildi - ' + wsUser.username + ' - frame=' + frameVal + ' stone=' + stoneVal);
           } else {
-            console.log('WS: dekorasiya redd edildi - sahiplenilmemis - ' + wsUser.username + ' - ' + frameVal);
+            DEBUG_GAME_LOGS && debugGame('WS: dekorasiya redd edildi - sahiplenilmemis - ' + wsUser.username + ' - ' + frameVal);
           }
         }} else if (msg.type === 'claim_achievement_bonus') {
         if (wsUser && msg.achievement_id) {
@@ -2651,9 +2685,9 @@ if (wsUser) {
             db.prepare('UPDATE users SET coins = coins + ? WHERE id = ?').run(bonusAmount2, wsUser.id);
             found.claimed = true;
             db.prepare('UPDATE users SET achievements = ? WHERE id = ?').run(JSON.stringify(achList2), wsUser.id);
-            console.log('WS: nailiyyet bonusu balansa kocdu - ' + wsUser.username + ' - ' + msg.achievement_id + ' +' + bonusAmount2 + ' coin');
+            DEBUG_GAME_LOGS && debugGame('WS: nailiyyet bonusu balansa kocdu - ' + wsUser.username + ' - ' + msg.achievement_id + ' +' + bonusAmount2 + ' coin');
           } else {
-            console.log('WS: nailiyyet bonusu redd edildi - artiq alinib veya tapilmadi - ' + wsUser.username + ' - ' + msg.achievement_id);
+            DEBUG_GAME_LOGS && debugGame('WS: nailiyyet bonusu redd edildi - artiq alinib veya tapilmadi - ' + wsUser.username + ' - ' + msg.achievement_id);
           }
         }} else if (msg.type === 'items_get') {
         let ownedItemsObj = {};
@@ -2665,11 +2699,11 @@ if (wsUser) {
         }
         const itemsGetResponse = {
           type: 'items_get',
-          packet: ws.packetCounter++,
+
           items: ownedItemsObj
         };
-        ws.send(encodeMessage(itemsGetResponse));
-        console.log('WS SENT: items_get response - ' + Object.keys(ownedItemsObj).length + ' items');} else if (msg.type === 'items_use') {
+        sendGame(ws, itemsGetResponse);
+        DEBUG_GAME_LOGS && debugGame('WS SENT: items_get response - ' + Object.keys(ownedItemsObj).length + ' items');} else if (msg.type === 'items_use') {
         if (wsUser && ['kiss_fire', 'refuse_slap', 'league_kiss2x', 'league_kiss_lim10', 'league5'].indexOf(msg.item) >= 0) {
           const ownedRowKF = db.prepare('SELECT owned_items FROM users WHERE id = ?').get(wsUser.id);
           let ownedKF = {};
@@ -2690,7 +2724,7 @@ if (wsUser) {
             }
             if (msg.item === 'refuse_slap') { ws.refuseSlapActive = true; }
             if (msg.item === 'league5') addDailyLeagueScore(wsUser.id, 5);
-            console.log('WS: ' + msg.item + ' istifade edildi - ' + wsUser.username + ' - qalan=' + ownedKF[msg.item]);
+            DEBUG_GAME_LOGS && debugGame('WS: ' + msg.item + ' istifade edildi - ' + wsUser.username + ' - qalan=' + ownedKF[msg.item]);
           }
         }
       } else if (msg.type === 'get_tops') {
@@ -2715,7 +2749,7 @@ if (wsUser) {
           const sortCol = sortColMap[category] || 'total_kisses';
           if (!period) {
             const topUsers = db.prepare('SELECT * FROM users ORDER BY CAST(' + sortCol + ' AS INTEGER) DESC LIMIT 50').all();
-            if (category === 'gestures') console.log('WS: DEBUG SQL raw sirali - sortCol=' + sortCol + ' - ' + JSON.stringify(topUsers.slice(0,5).map(function(u){return {name:u.username, tokens:u.tokens};})));
+            if (category === 'gestures') DEBUG_GAME_LOGS && debugGame('WS: DEBUG SQL raw sirali - sortCol=' + sortCol + ' - ' + JSON.stringify(topUsers.slice(0,5).map(function(u){return {name:u.username, tokens:u.tokens};})));
             return topUsers.map((u, idx) => ({
               id: String(u.id), male: u.gender !== 'female', name: u.display_name || u.username,
               photo_url: u.avatar_data ? ('/api/avatar/' + u.id) : '', total_kisses: u.total_kisses, points: u.points, price: u.harem_price_stat || 0,
@@ -2770,19 +2804,19 @@ if (wsUser) {
         });
         const topsResponse = {
           type: 'get_tops',
-          packet: ws.packetCounter++,
+
           tops: tops
         };
-        ws.send(encodeMessage(topsResponse));
-        console.log('WS SENT: get_tops response');
-        if (tops.gestures) console.log('WS: DEBUG gestures top3 - ' + JSON.stringify(tops.gestures.top.slice(0,3).map(function(x){return {name:x.name, gestures:x.gestures};})));
+        sendGame(ws, topsResponse);
+        DEBUG_GAME_LOGS && debugGame('WS SENT: get_tops response');
+        if (tops.gestures) DEBUG_GAME_LOGS && debugGame('WS: DEBUG gestures top3 - ' + JSON.stringify(tops.gestures.top.slice(0,3).map(function(x){return {name:x.name, gestures:x.gestures};})));
                   } else if (['game_hat', 'game_gift', 'game_drink', 'game_gesture', 'game_kiss', 'send_gift', 'game_chat', 'game_chat_message', 'game_turn_offer', 'game_bottle', 'game_music'].indexOf(msg.type) >= 0) {
-        console.log('WS: hediyye/gift mesaji broadcast edilir - ' + msg.type);
+        DEBUG_GAME_LOGS && debugGame('WS: hediyye/gift mesaji broadcast edilir - ' + msg.type);
         if (wsUser && (msg.type === 'game_chat' || msg.type === 'game_chat_message')) {
           const chatTextToCheck = (msg.body || msg.text || '');
           if (containsBannedWord(chatTextToCheck) || containsPhoneNumber(chatTextToCheck)) {
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'chat_blocked', reason: containsPhoneNumber(chatTextToCheck) ? 'phone_number' : 'banned_word' }));
-            console.log('WS: mesaj bloklandi (pis soz/nomre) - ' + wsUser.username + ' - ' + chatTextToCheck.substring(0,50));
+            sendGame(ws, {  type: 'chat_blocked', reason: containsPhoneNumber(chatTextToCheck) ? 'phone_number' : 'banned_word' });
+            DEBUG_GAME_LOGS && debugGame('WS: mesaj bloklandi (pis soz/nomre) - ' + wsUser.username);
             return;
           }
           const today = new Date().toISOString().slice(0, 10);
@@ -2794,16 +2828,16 @@ if (wsUser) {
           }
           const muteCheck = db.prepare('SELECT muted_until FROM users WHERE id = ?').get(wsUser.id);
           if (muteCheck && muteCheck.muted_until && new Date(muteCheck.muted_until) > new Date()) {
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'you_are_muted' }));
-            console.log('WS: susdurulmus istifadeci yazmaga cehd etdi - ' + wsUser.username);
+            sendGame(ws, {  type: 'you_are_muted' });
+            DEBUG_GAME_LOGS && debugGame('WS: susdurulmus istifadeci yazmaga cehd etdi - ' + wsUser.username);
             return;
           }
         }
         if (wsUser && ['game_hat', 'game_gift', 'game_drink'].indexOf(msg.type) >= 0) {
           const banCheck = db.prepare('SELECT gift_banned_until FROM users WHERE id = ?').get(wsUser.id);
           if (banCheck && banCheck.gift_banned_until && new Date(banCheck.gift_banned_until) > new Date()) {
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'you_are_gift_banned' }));
-            console.log('WS: hediyye qadagali istifadeci cehd etdi - ' + wsUser.username);
+            sendGame(ws, {  type: 'you_are_gift_banned' });
+            DEBUG_GAME_LOGS && debugGame('WS: hediyye qadagali istifadeci cehd etdi - ' + wsUser.username);
             return;
           }
         }
@@ -2811,19 +2845,20 @@ if (wsUser) {
           const giftId = msg.gift_type || msg.hat_type || msg.drink_type || msg.gesture_type || '';
           {
             const nowTs = Date.now();
-            const recentGifts = (ws.recentGameGifts || []).filter(ts => nowTs - ts < 2000);
-            if (recentGifts.length >= 100) {
-              ws.recentGameGifts = recentGifts;
+            const recentGifts = (gameGiftRate.get(wsUser.id) || []).filter(ts => nowTs - ts < 2000);
+            if (recentGifts.length >= 8) {
+              gameGiftRate.set(wsUser.id, recentGifts);
+              sendGame(ws, { type: 'game_action_error', error: 'rate_limited', action: msg.type });
               return;
             }
             recentGifts.push(nowTs);
-            ws.recentGameGifts = recentGifts;
+            gameGiftRate.set(wsUser.id, recentGifts);
           }
           if (msg.receiver_id && ws.gameRoom) {
             let receiverStillHere = false;
             ws.gameRoom.players.forEach((p) => { if (String(p.id) === String(msg.receiver_id)) receiverStillHere = true; });
             if (!receiverStillHere) {
-              console.log('WS: hediyye redd edildi - receiver otaqdan cixib - ' + wsUser.username);
+              DEBUG_GAME_LOGS && debugGame('WS: hediyye redd edildi - receiver otaqdan cixib - ' + wsUser.username);
               return;
             }
           }
@@ -2831,20 +2866,20 @@ if (wsUser) {
           if (price > 0) {
             const charge = db.prepare('UPDATE users SET coins = coins - ? WHERE id = ? AND coins >= ?').run(price, wsUser.id, price);
             if (!charge.changes) {
-              console.log('WS: hediyye redd edildi - kifayet qeder coin yoxdur - ' + wsUser.username + ' gift=' + giftId + ' price=' + price);
+              DEBUG_GAME_LOGS && debugGame('WS: hediyye redd edildi - kifayet qeder coin yoxdur - ' + wsUser.username + ' gift=' + giftId + ' price=' + price);
               return;
             }
             addDailyLeagueScore(wsUser.id, 1);
-            console.log('WS: hediyye ucun coin cixarildi - ' + wsUser.username + ' gift=' + giftId + ' price=' + price);
+            DEBUG_GAME_LOGS && debugGame('WS: hediyye ucun coin cixarildi - ' + wsUser.username + ' gift=' + giftId + ' price=' + price);
             if (msg.receiver_id && ws.gameRoom && ws.gameRoom.currentSong && ws.gameRoom.currentSong.sender && String(ws.gameRoom.currentSong.sender.id) === String(msg.receiver_id)) {
               db.prepare('UPDATE users SET points = points + 1 WHERE id = ?').run(Number(msg.receiver_id));
               db.prepare("INSERT INTO transactions (user_id, type, amount, reason) VALUES (?, 'dj_score_period', 1, 'kiss_song')").run(Number(msg.receiver_id));
-              console.log('WS: DJ-ye hediyye ucun xal artirildi - receiver_id=' + msg.receiver_id);
+              DEBUG_GAME_LOGS && debugGame('WS: DJ-ye hediyye ucun xal artirildi - receiver_id=' + msg.receiver_id);
             }
             if (giftId === 'love' && msg.receiver_id) {
               db.prepare('UPDATE users SET coins = coins + 1 WHERE id = ?').run(msg.receiver_id);
               msg.gold = 1;
-              console.log('WS: love hediyyesi bonusu - receiver_id=' + msg.receiver_id + ' +1 coin');
+              DEBUG_GAME_LOGS && debugGame('WS: love hediyyesi bonusu - receiver_id=' + msg.receiver_id + ' +1 coin');
             }
           }
           if (price > 0) {
@@ -2881,13 +2916,13 @@ if (wsUser) {
                 achList.push({ achievement_id: achId, timestamp: Date.now(), level: newLevel });
                 db.prepare('UPDATE users SET achievements = ? WHERE id = ?').run(JSON.stringify(achList), wsUser.id);
                 const bonusAmount = (newLevel + 1) * 5;
-                ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'achievement_bonus', user: { id: String(wsUser.id) }, achievement_id: achId, level: newLevel, timestamp: Date.now(), bonus: bonusAmount }));
-                console.log('WS: nailiyyet artirildi - ' + wsUser.username + ' - ' + achId + ' seviyye=' + newLevel + ' say=' + rawCount);
+                sendGame(ws, {  type: 'achievement_bonus', user: { id: String(wsUser.id) }, achievement_id: achId, level: newLevel, timestamp: Date.now(), bonus: bonusAmount });
+                DEBUG_GAME_LOGS && debugGame('WS: nailiyyet artirildi - ' + wsUser.username + ' - ' + achId + ' seviyye=' + newLevel + ' say=' + rawCount);
                 if (ws.gameRoom) {
                   broadcastToRoom(ws.gameRoom, null, { type: 'game_chat', body: '\u2b50 ' + (wsUser.display_name || wsUser.username) + ' yeni nailiyyet qazandi: ' + achId + ' (seviyye ' + (newLevel + 1) + ')', receiver_id: '', receiver_name: '', user: { id: '0', name: 'Sistem', male: true } });
                 }
               } else {
-                console.log('WS: nailiyyet sayi artirildi (seviyye deyismedi) - ' + wsUser.username + ' - ' + achId + ' say=' + rawCount);
+                DEBUG_GAME_LOGS && debugGame('WS: nailiyyet sayi artirildi (seviyye deyismedi) - ' + wsUser.username + ' - ' + achId + ' say=' + rawCount);
               }
             }
           }
@@ -2925,17 +2960,17 @@ if (msg.receiver_id && ws.gameRoom) {
             if (leveledUp) {
               const bonusAmount = newLevel * 10;
               db.prepare('UPDATE users SET coins = coins + ? WHERE id = ?').run(bonusAmount, wsUser.id);
-              ws.send(encodeMessage({
-                packet: ws.packetCounter = (ws.packetCounter||1000)+1,
+              sendGame(ws, {
+
                 type: 'achievement_bonus',
-                packet: ws.packetCounter++,
+
                 user: { id: String(wsUser.id) },
                 achievement_id: giftId,
                 level: newLevel,
                 timestamp: Date.now(),
                 bonus: bonusAmount
-              }));
-              console.log('WS: nailiyyet acildi - ' + wsUser.username + ' gift=' + giftId + ' level=' + newLevel + ' bonus=' + bonusAmount);
+              });
+              DEBUG_GAME_LOGS && debugGame('WS: nailiyyet acildi - ' + wsUser.username + ' gift=' + giftId + ' level=' + newLevel + ' bonus=' + bonusAmount);
             }
           }
         }
@@ -2944,16 +2979,16 @@ if (msg.receiver_id && ws.gameRoom) {
           if (msg.type === 'game_gesture') {
             const gCurrentUser = db.prepare('SELECT tokens FROM users WHERE id = ?').get(wsUser.id);
             if (!gCurrentUser || gCurrentUser.tokens < 1) {
-              console.log('WS: smaylik redd edildi - kifayet qeder token yoxdur - ' + wsUser.username);
+              DEBUG_GAME_LOGS && debugGame('WS: smaylik redd edildi - kifayet qeder token yoxdur - ' + wsUser.username);
             } else {
               db.prepare('UPDATE users SET tokens = tokens - 1, gestures_sent = gestures_sent + 1 WHERE id = ?').run(wsUser.id);
               wsUser.tokens = wsUser.tokens - 1;
               wsUser.gestures_sent = (wsUser.gestures_sent || 0) + 1;
               db.prepare("INSERT INTO transactions (user_id, type, amount, reason) VALUES (?, 'gestures_period', 1, 'gesture')").run(wsUser.id);
-              console.log('WS: smaylik xerclendi - ' + wsUser.username + ' -1 token');
+              DEBUG_GAME_LOGS && debugGame('WS: smaylik xerclendi - ' + wsUser.username + ' -1 token');
             }
           }
-          console.log('WS: pass_score artirildi - ' + wsUser.username);
+          DEBUG_GAME_LOGS && debugGame('WS: pass_score artirildi - ' + wsUser.username);
         }
         if (msg.type === 'game_turn_offer') {
           if (ws.gameRoom) {
@@ -2962,14 +2997,14 @@ if (msg.receiver_id && ws.gameRoom) {
               if (p.male) hasMale = true; else hasFemale = true;
             });
             if (!hasMale || !hasFemale) {
-              console.log('WS: sise firlatma bloklandi - masada hem oglan hem qiz olmalidir');
+              DEBUG_GAME_LOGS && debugGame('WS: sise firlatma bloklandi - masada hem oglan hem qiz olmalidir');
               return;
             }
           }
         }if (msg.type === 'game_bottle' && ws.gameRoom) {
           if (msg.bottle_type) {
             ws.gameRoom.bottleType = msg.bottle_type;
-            console.log('WS: masanin sise tipi deyisdirildi - masa=' + ws.gameRoom.gameId + ' - ' + msg.bottle_type);
+            DEBUG_GAME_LOGS && debugGame('WS: masanin sise tipi deyisdirildi - masa=' + ws.gameRoom.gameId + ' - ' + msg.bottle_type);
             broadcastToRoom(ws.gameRoom, null, { type: 'game_bottle', bottle_type: msg.bottle_type });
           }
           if (!ws.gameRoom.pendingSpin && !ws.gameRoom.bottleTimer) {
@@ -2991,9 +3026,9 @@ if (msg.type === 'game_chat_message') {
             if (ws.gameRoom && ws.gameRoom.currentSong && ws.gameRoom.currentSong.sender && String(ws.gameRoom.currentSong.sender.id) === String(receiverPlayer2.id)) {
               db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(kissFireMultiplier, Number(receiverPlayer2.id));
               db.prepare("INSERT INTO transactions (user_id, type, amount, reason) VALUES (?, 'dj_score_period', ?, 'kiss_song')").run(Number(receiverPlayer2.id), kissFireMultiplier);
-              console.log('WS: DJ-ye opus ucun xal artirildi (x' + kissFireMultiplier + ') - ' + receiverPlayer2.name);
+              DEBUG_GAME_LOGS && debugGame('WS: DJ-ye opus ucun xal artirildi (x' + kissFireMultiplier + ') - ' + receiverPlayer2.name);
             }
-            console.log('WS: opus alan ' + receiverPlayer2.name + ' xali artirildi');
+            DEBUG_GAME_LOGS && debugGame('WS: opus alan ' + receiverPlayer2.name + ' xali artirildi');
             db.prepare("INSERT INTO transactions (user_id, type, amount, reason) VALUES (?, 'total_kisses_period', 1, 'kiss')").run(Number(receiverPlayer2.id));
             addDailyLeagueScore(Number(receiverPlayer2.id), 1);
             if (kissFireMultiplier === 2) {
@@ -3010,15 +3045,15 @@ if (msg.type === 'game_chat_message') {
             if (ws.gameRoom && ws.gameRoom.currentSong && ws.gameRoom.currentSong.sender && String(ws.gameRoom.currentSong.sender.id) === String(receiverPlayer3.id)) {
               db.prepare('UPDATE users SET points = points + 1 WHERE id = ?').run(Number(receiverPlayer3.id));
               db.prepare("INSERT INTO transactions (user_id, type, amount, reason) VALUES (?, 'dj_score_period', 1, 'air_kiss_song')").run(Number(receiverPlayer3.id));
-              console.log('WS: DJ-ye hediyye-opus ucun xal artirildi - ' + receiverPlayer3.name);
+              DEBUG_GAME_LOGS && debugGame('WS: DJ-ye hediyye-opus ucun xal artirildi - ' + receiverPlayer3.name);
             }
-            console.log('WS: hediyye opusu alan ' + receiverPlayer3.name + ' xali artirildi');
+            DEBUG_GAME_LOGS && debugGame('WS: hediyye opusu alan ' + receiverPlayer3.name + ' xali artirildi');
             db.prepare("INSERT INTO transactions (user_id, type, amount, reason) VALUES (?, 'total_kisses_period', 1, 'gift_kiss')").run(Number(receiverPlayer3.id));
           }
         }
-        console.log('DEBUG-BEFORE-GAMEPLAYER-CHECK: type=' + msg.type + ' has_gamePlayer=' + Boolean(ws.gamePlayer));
+        DEBUG_GAME_LOGS && debugGame('DEBUG-BEFORE-GAMEPLAYER-CHECK: type=' + msg.type + ' has_gamePlayer=' + Boolean(ws.gamePlayer));
         if (ws.gamePlayer) {
-          msg.user = { id: ws.gamePlayer.id, name: ws.gamePlayer.name, male: ws.gamePlayer.male, vip: ws.gamePlayer.vip, pass_premium: ws.gamePlayer.pass_premium, top: ws.gamePlayer.top, photo_url: ws.gamePlayer.photo_url }; console.log('DEBUG-AFTER-USER-ASSIGN: type=' + msg.type);
+          msg.user = { id: ws.gamePlayer.id, name: ws.gamePlayer.name, male: ws.gamePlayer.male, vip: ws.gamePlayer.vip, pass_premium: ws.gamePlayer.pass_premium, top: ws.gamePlayer.top, photo_url: ws.gamePlayer.photo_url }; DEBUG_GAME_LOGS && debugGame('DEBUG-AFTER-USER-ASSIGN: type=' + msg.type);
         }
         if (msg.receiver_id && ws.gameRoom) {
           let receiverPlayer = null;
@@ -3027,13 +3062,13 @@ if (msg.type === 'game_chat_message') {
             msg.receiver = { id: receiverPlayer.id, name: receiverPlayer.name, male: receiverPlayer.male, photo_url: receiverPlayer.photo_url };
           }
         }
-        console.log('DEBUG-BEFORE-MUSIC-CHECK: type=' + msg.type); if (msg.type === 'game_music' && ws.gamePlayer) {
+        DEBUG_GAME_LOGS && debugGame('DEBUG-BEFORE-MUSIC-CHECK: type=' + msg.type); if (msg.type === 'game_music' && ws.gamePlayer) {
           if (wsUser) {
             db.prepare('UPDATE users SET coins = coins - 5 WHERE id = ?').run(wsUser.id);
-            console.log('WS: mahni ucun coin cixarildi - ' + wsUser.username + ' duration=' + msg.duration + ' title=' + msg.title);
+            DEBUG_GAME_LOGS && debugGame('WS: mahni ucun coin cixarildi - ' + wsUser.username + ' duration=' + msg.duration + ' title=' + msg.title);
             const djScoreAmt = (msg.provider === 'cz') ? 5 : 9;
             db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(djScoreAmt, wsUser.id);
-            db.prepare("INSERT INTO transactions (user_id, type, amount, reason) VALUES (?, 'dj_score_period', ?, 'song_send')").run(wsUser.id, djScoreAmt);           console.log('WS: mahni gonderdiyi ucun xal artirildi - ' + wsUser.username);
+            db.prepare("INSERT INTO transactions (user_id, type, amount, reason) VALUES (?, 'dj_score_period', ?, 'song_send')").run(wsUser.id, djScoreAmt);           DEBUG_GAME_LOGS && debugGame('WS: mahni gonderdiyi ucun xal artirildi - ' + wsUser.username);
           }
           msg.sender = { id: ws.gamePlayer.id, name: ws.gamePlayer.name, male: ws.gamePlayer.male, photo_url: ws.gamePlayer.photo_url };
           msg.start_timestamp = Date.now();
@@ -3048,7 +3083,7 @@ if (msg.type === 'game_chat_message') {
                 msg.song_id = cached.video_id;
                 msg.url = '';
                 msg.duration = cached.duration || msg.duration;
-                console.log('WS: mahni keshden tapildi - ' + msg.title + ' -> videoId=' + cached.video_id);
+                DEBUG_GAME_LOGS && debugGame('WS: mahni keshden tapildi - ' + msg.title + ' -> videoId=' + cached.video_id);
               } else {
                 const apiKey = process.env.YOUTUBE_API_KEY;
                 if (apiKey) {
@@ -3068,27 +3103,27 @@ if (msg.type === 'game_chat_message') {
                     msg.song_id = videoId;
                     msg.url = '';
                     msg.duration = ytDuration || msg.duration;
-                    console.log('WS: mahni youtube-dan tapildi ve keshlendi - ' + msg.title + ' -> videoId=' + videoId);
+                    DEBUG_GAME_LOGS && debugGame('WS: mahni youtube-dan tapildi ve keshlendi - ' + msg.title + ' -> videoId=' + videoId);
                   } else {
-                    console.log('WS: youtube-da tapilmadi - ' + msg.title);
+                    DEBUG_GAME_LOGS && debugGame('WS: youtube-da tapilmadi - ' + msg.title);
                   }
                 }
               }
             } catch (ytErr) {
-              console.log('WS: youtube axtaris xetasi - ' + ytErr.message);
+              DEBUG_GAME_LOGS && debugGame('WS: youtube axtaris xetasi - ' + ytErr.message);
             }
           }
           if (ws.gameRoom) { ws.gameRoom.currentSong = Object.assign({}, msg); }
         }
         if (ws.gameRoom) {
-          console.log('DEBUG-ENTERED-BCAST-BLOCK: type=' + msg.type);
+          DEBUG_GAME_LOGS && debugGame('DEBUG-ENTERED-BCAST-BLOCK: type=' + msg.type);
           if (msg.type === 'game_chat' && ws.gameRoom) {
             if (!ws.gameRoom.chatHistory) ws.gameRoom.chatHistory = [];
             ws.gameRoom.chatHistory.push(msg);
             if (ws.gameRoom.chatHistory.length > 20) ws.gameRoom.chatHistory.shift();
-            console.log('CHAT-HISTORY-DEBUG: mesaj saxlanildi, hazirki uzunluk=' + ws.gameRoom.chatHistory.length + ' msg=' + JSON.stringify(msg).substring(0,300));
+            DEBUG_GAME_LOGS && debugGame('CHAT-HISTORY: stored');
           }
-          console.log('DEBUG-BROADCAST-CATDI: type=' + msg.type); broadcastToRoom(ws.gameRoom, null, msg);if (msg.type === 'game_music') {
+          DEBUG_GAME_LOGS && debugGame('DEBUG-BROADCAST-CATDI: type=' + msg.type); broadcastToRoom(ws.gameRoom, null, msg);if (msg.type === 'game_music') {
             const chatMsg = Object.assign({}, msg, { type: 'game_music_chat' });
             broadcastToRoom(ws.gameRoom, null, chatMsg);
             if (wsUser) {
@@ -3100,7 +3135,7 @@ if (msg.type === 'game_chat_message') {
                 db.prepare('UPDATE users SET daily_message_count = daily_message_count + 1 WHERE id = ?').run(wsUser.id);
               }
               const musicOnlyRow = db.prepare('SELECT daily_music_date FROM users WHERE id = ?').get(wsUser.id);
-              const musicScoreAmt = (msg.provider === 'cz') ? 5 : 9; console.log('MUSIC-SCORE-DEBUG: provider=' + msg.provider + ' amt=' + musicScoreAmt);
+              const musicScoreAmt = (msg.provider === 'cz') ? 5 : 9; DEBUG_GAME_LOGS && debugGame('MUSIC-SCORE-DEBUG: provider=' + msg.provider + ' amt=' + musicScoreAmt);
               if (musicOnlyRow.daily_music_date !== todayMusic) {
                 db.prepare('UPDATE users SET daily_music_count = ?, daily_music_date = ? WHERE id = ?').run(musicScoreAmt, todayMusic, wsUser.id);
               } else {
@@ -3111,24 +3146,24 @@ if (msg.type === 'game_chat_message') {
         }} else if (msg.type === 'live_start') {
         if (wsUser) {
           liveStreams.set(wsUser.id, { hostWs: ws, hostId: wsUser.id, hostName: wsUser.display_name || wsUser.username, viewers: new Set() });
-          ws.send(encodeMessage({ type: 'live_start', packet: ws.packetCounter = (ws.packetCounter||1000)+1, success: true }));
-          console.log('WS: canli yayin baslandi - ' + wsUser.username);
+          sendGame(ws, { type: 'live_start',  success: true });
+          DEBUG_GAME_LOGS && debugGame('WS: canli yayin baslandi - ' + wsUser.username);
         }
       } else if (msg.type === 'live_end') {
         if (wsUser && liveStreams.has(wsUser.id)) {
           const stream = liveStreams.get(wsUser.id);
           stream.viewers.forEach(viewerWs => {
-            viewerWs.send(encodeMessage({ type: 'live_ended', packet: viewerWs.packetCounter = (viewerWs.packetCounter||1000)+1, host_id: wsUser.id }));
+            sendGame(viewerWs, { type: 'live_ended',  host_id: wsUser.id });
           });
           liveStreams.delete(wsUser.id);
-          console.log('WS: canli yayin bitdi - ' + wsUser.username);
+          DEBUG_GAME_LOGS && debugGame('WS: canli yayin bitdi - ' + wsUser.username);
         }
       } else if (msg.type === 'live_frame') {
         if (wsUser && liveStreams.has(wsUser.id)) {
           const stream = liveStreams.get(wsUser.id);
           stream.viewers.forEach(viewerWs => {
             if (viewerWs.readyState === WebSocket.OPEN) {
-              viewerWs.send(encodeMessage({ type: 'live_frame', packet: viewerWs.packetCounter = (viewerWs.packetCounter||1000)+1, frame: msg.frame, host_id: wsUser.id }));
+              sendGame(viewerWs, { type: 'live_frame',  frame: msg.frame, host_id: wsUser.id });
             }
           });
         }
@@ -3137,7 +3172,7 @@ if (msg.type === 'game_chat_message') {
           const streamA = liveStreams.get(wsUser.id);
           streamA.viewers.forEach(viewerWsA => {
             if (viewerWsA.readyState === WebSocket.OPEN) {
-              viewerWsA.send(encodeMessage({ type: 'live_audio', packet: viewerWsA.packetCounter = (viewerWsA.packetCounter||1000)+1, audio: msg.audio, host_id: wsUser.id }));
+              sendGame(viewerWsA, { type: 'live_audio',  audio: msg.audio, host_id: wsUser.id });
             }
           });
         }
@@ -3147,9 +3182,9 @@ if (msg.type === 'game_chat_message') {
           const stream = liveStreams.get(hostId);
           stream.viewers.add(ws);
           ws.watchingLiveHostId = hostId;
-          ws.send(encodeMessage({ type: 'live_joined', packet: ws.packetCounter = (ws.packetCounter||1000)+1, host_id: hostId, host_name: stream.hostName }));
+          sendGame(ws, { type: 'live_joined',  host_id: hostId, host_name: stream.hostName });
         } else {
-          ws.send(encodeMessage({ type: 'live_not_found', packet: ws.packetCounter = (ws.packetCounter||1000)+1 }));
+          sendGame(ws, { type: 'live_not_found', });
         }
       } else if (msg.type === 'live_leave') {
         if (ws.watchingLiveHostId && liveStreams.has(ws.watchingLiveHostId)) {
@@ -3160,9 +3195,9 @@ if (msg.type === 'game_chat_message') {
           const hostId2 = Number(msg.host_id);
           if (liveStreams.has(hostId2)) {
             const stream2 = liveStreams.get(hostId2);
-            const chatMsg2 = { type: 'live_chat', packet: 1, user: { id: wsUser.id, name: wsUser.display_name || wsUser.username }, text: msg.text };
-            stream2.viewers.forEach(v => v.send(encodeMessage(Object.assign({}, chatMsg2, { packet: v.packetCounter = (v.packetCounter||1000)+1 }))));
-            if (stream2.hostWs.readyState === WebSocket.OPEN) stream2.hostWs.send(encodeMessage(Object.assign({}, chatMsg2, { packet: stream2.hostWs.packetCounter = (stream2.hostWs.packetCounter||1000)+1 })));
+            const chatMsg2 = { type: 'live_chat',  user: { id: wsUser.id, name: wsUser.display_name || wsUser.username }, text: msg.text };
+            stream2.viewers.forEach(v => sendGame(v, chatMsg2));
+            if (stream2.hostWs.readyState === WebSocket.OPEN) sendGame(stream2.hostWs, chatMsg2);
           }
         }
       } else if (msg.type === 'live_gift') {
@@ -3175,9 +3210,9 @@ if (msg.type === 'game_chat_message') {
             db.prepare('UPDATE users SET live_balance = COALESCE(live_balance, 0) + ? WHERE id = ?').run(giftTokenCost, hostId3);
             if (liveStreams.has(hostId3)) {
               const stream3 = liveStreams.get(hostId3);
-              const giftMsg = { type: 'live_gift', packet: 1, user: { id: wsUser.id, name: wsUser.display_name || wsUser.username }, gift_id: msg.gift_id, token_cost: giftTokenCost };
-              stream3.viewers.forEach(v => v.send(encodeMessage(Object.assign({}, giftMsg, { packet: v.packetCounter = (v.packetCounter||1000)+1 }))));
-              if (stream3.hostWs.readyState === WebSocket.OPEN) stream3.hostWs.send(encodeMessage(Object.assign({}, giftMsg, { packet: stream3.hostWs.packetCounter = (stream3.hostWs.packetCounter||1000)+1 })));
+              const giftMsg = { type: 'live_gift',  user: { id: wsUser.id, name: wsUser.display_name || wsUser.username }, gift_id: msg.gift_id, token_cost: giftTokenCost };
+              stream3.viewers.forEach(v => sendGame(v, giftMsg));
+              if (stream3.hostWs.readyState === WebSocket.OPEN) sendGame(stream3.hostWs, giftMsg);
             }
           }
         }
@@ -3189,12 +3224,12 @@ if (msg.type === 'game_chat_message') {
           }
           if (ws.gameRoom.finishSpin) {
             ws.gameRoom.finishSpin();
-            console.log('WS: butulka klikle firlandi - ' + wsUser.username);
+            DEBUG_GAME_LOGS && debugGame('WS: butulka klikle firlandi - ' + wsUser.username);
           }
           if (Math.random() < 0.1) {
             db.prepare('UPDATE users SET coins = coins + 1 WHERE id = ?').run(wsUser.id);
-            ws.send(encodeMessage({ packet: ws.packetCounter++, type: 'game_lucky_gold', amount: 1, user: { id: String(wsUser.id), name: wsUser.username } }));
-            console.log('WS: sansl² qizil verildi - ' + wsUser.username);
+            sendGame(ws, {  type: 'game_lucky_gold', amount: 1, user: { id: String(wsUser.id), name: wsUser.username } });
+            DEBUG_GAME_LOGS && debugGame('WS: sansl² qizil verildi - ' + wsUser.username);
           }
         }} else if (msg.type === 'game_turn' && msg.packet === undefined) {
         if (ws.gameRoom && ws.gameRoom.pendingSpin && ws.gameRoom.pendingSpin.active && wsUser && String(ws.gameRoom.pendingSpin.active.p.id) === String(wsUser.id)) {
@@ -3204,12 +3239,12 @@ if (msg.type === 'game_chat_message') {
           }
           if (ws.gameRoom.finishSpin) {
             ws.gameRoom.finishSpin();
-            console.log('WS: butulka (v2) klikle firlandi - ' + wsUser.username);
+            DEBUG_GAME_LOGS && debugGame('WS: butulka (v2) klikle firlandi - ' + wsUser.username);
           }
           if (Math.random() < 0.1) {
             db.prepare('UPDATE users SET coins = coins + 1 WHERE id = ?').run(wsUser.id);
-            ws.send(encodeMessage({ packet: ws.packetCounter++, type: 'game_lucky_gold', amount: 1, user: { id: String(wsUser.id), name: wsUser.username } }));
-            console.log('WS: sansli qizil (v2) verildi - ' + wsUser.username);
+            sendGame(ws, {  type: 'game_lucky_gold', amount: 1, user: { id: String(wsUser.id), name: wsUser.username } });
+            DEBUG_GAME_LOGS && debugGame('WS: sansli qizil (v2) verildi - ' + wsUser.username);
           }
         }
       } else if (msg.type === 'game_turn' && msg.packet === undefined) {
@@ -3220,12 +3255,12 @@ if (msg.type === 'game_chat_message') {
           }
           if (ws.gameRoom.finishSpin) {
             ws.gameRoom.finishSpin();
-            console.log('WS: butulka (v2) klikle firlandi - ' + wsUser.username);
+            DEBUG_GAME_LOGS && debugGame('WS: butulka (v2) klikle firlandi - ' + wsUser.username);
           }
           if (Math.random() < 0.1) {
             db.prepare('UPDATE users SET coins = coins + 1 WHERE id = ?').run(wsUser.id);
-            ws.send(encodeMessage({ packet: ws.packetCounter++, type: 'game_lucky_gold', amount: 1, user: { id: String(wsUser.id), name: wsUser.username } }));
-            console.log('WS: sansli qizil (v2) verildi - ' + wsUser.username);
+            sendGame(ws, {  type: 'game_lucky_gold', amount: 1, user: { id: String(wsUser.id), name: wsUser.username } });
+            DEBUG_GAME_LOGS && debugGame('WS: sansli qizil (v2) verildi - ' + wsUser.username);
           }
         }
       } else if (msg.type === 'league_info') {
@@ -3236,8 +3271,8 @@ if (msg.type === 'game_chat_message') {
         const tierOrderList = ['wood', 'rock', 'iron', 'steel', 'bronze', 'marble', 'silver', 'gold', 'platinum', 'amber', 'amethyst', 'topaz', 'pearls', 'sapphire', 'ruby', 'emerald', 'diamond'];
         const myLeague = tierOrderList.indexOf(myTierName);
         const leagueUsers = db.prepare('SELECT id, username, display_name, daily_league_score, avatar_data FROM users WHERE league_tier = ? AND daily_league_date = ? ORDER BY daily_league_score DESC LIMIT 10').all(myTierName, todayLeague);
-        ws.send(encodeMessage({
-          packet: ws.packetCounter = (ws.packetCounter||1000)+1,
+        sendGame(ws, {
+
           type: 'league_info',
           league_state: myScore >= 1 ? 'running' : 'idle',
           league: myLeague,
@@ -3256,7 +3291,7 @@ if (msg.type === 'game_chat_message') {
             rank: i + 1,
             photo_url: u.avatar_data ? ('/api/avatar/' + u.id) : ''
           }))
-        }));} else if (msg.type === 'pass_info') {
+        });} else if (msg.type === 'pass_info') {
         const REFERENCE_EPOCH_MS = new Date('2026-08-03T02:00:00Z').getTime();
         const dayMs2 = 24 * 60 * 60 * 1000;
         const seasonLengthMs = 35 * dayMs2;
@@ -3309,7 +3344,7 @@ if (msg.type === 'game_chat_message') {
         }
         const passInfoResponse = {
           type: 'pass_info',
-          packet: ws.packetCounter++,
+
           state: 'running',
           pass_premium: isPassPremium,
           score: userPassScore,
@@ -3319,8 +3354,8 @@ if (msg.type === 'game_chat_message') {
           levels: passLevels,
           chest: { claimed: false, gold: 0, gold_max: 100, next_gold_score: 5000, overscore2gold: 50 }
         };
-        ws.send(encodeMessage(passInfoResponse));
-        console.log('WS SENT: pass_info response - level: ' + currentLevel);
+        sendGame(ws, passInfoResponse);
+        DEBUG_GAME_LOGS && debugGame('WS SENT: pass_info response - level: ' + currentLevel);
       } else if (msg.type === 'pass_claim_level_reward') {
         if (wsUser) {
           const level = msg.level || 0;
@@ -3337,19 +3372,19 @@ if (msg.type === 'game_chat_message') {
             gold = rewardRow ? (line === 'paid' ? rewardRow.paid_gold : rewardRow.free_gold) : (line === 'paid' ? (10 + level * 5) * 2 : 10 + level * 5);
             db.prepare('UPDATE users SET coins = coins + ? WHERE id = ?').run(gold, wsUser.id);
             db.prepare('INSERT INTO pass_claims (user_id, level, line, season_start_ms) VALUES (?, ?, ?, ?)').run(wsUser.id, level, line, seasonStart2);
-            console.log('WS: mukafat verildi - ' + wsUser.username + ' level=' + level + ' line=' + line + ' gold=' + gold);
+            DEBUG_GAME_LOGS && debugGame('WS: mukafat verildi - ' + wsUser.username + ' level=' + level + ' line=' + line + ' gold=' + gold);
           } else {
-            console.log('WS: mukafat artiq alinib - ' + wsUser.username + ' level=' + level);
+            DEBUG_GAME_LOGS && debugGame('WS: mukafat artiq alinib - ' + wsUser.username + ' level=' + level);
           }
           const rewardGold = alreadyClaimed ? 0 : gold;
           const claimResponse = {
             type: 'pass_claim_level_reward',
-            packet: ws.packetCounter++,
+
             level: level,
             line: line,
             reward: { gold: rewardGold }
           };
-          ws.send(encodeMessage(claimResponse));
+          sendGame(ws, claimResponse);
         }} else if (msg.type === 'get_friend_games') {
         const fellowsList = [];
         if (wsUser) {
@@ -3386,14 +3421,14 @@ if (msg.type === 'game_chat_message') {
         }
         const friendGamesResponse = {
           type: 'friend_games',
-          packet: ws.packetCounter++,
+
           friends: [],
           fellows: fellowsList,
           games_history: historyList
         };
-        ws.send(encodeMessage(friendGamesResponse));
-        console.log('WS SENT: friend_games response - fellows sayi: ' + fellowsList.length);} else if (msg.type === 'goto_random') {
-        console.log('WS: goto_random alindi');
+        sendGame(ws, friendGamesResponse);
+        DEBUG_GAME_LOGS && debugGame('WS SENT: friend_games response - fellows sayi: ' + fellowsList.length);} else if (msg.type === 'goto_random') {
+        DEBUG_GAME_LOGS && debugGame('WS: goto_random alindi');
         const oldRoomForRandom = ws.gameRoom;
         if (ws.gameRoom) {
           removePlayerFromRoom(ws.gameRoom, ws);
@@ -3421,7 +3456,7 @@ if (msg.type === 'game_chat_message') {
           const others = [];
           newRoom.players.forEach(p => others.push(p));
           if (wsUser && isKickedFromRoom(wsUser.id, newRoom.gameId)) {
-            ws.send(encodeMessage({ type: 'kickout_info', kickout_ts: wsUser.kicked_until, packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+            sendGame(ws, { type: 'kickout_info', kickout_ts: wsUser.kicked_until, });
             return;
           }
           newRoom.players.set(ws, rejoinedPlayer);
@@ -3430,21 +3465,21 @@ if (msg.type === 'game_chat_message') {
         if (rejoinedPlayer && rejoinedPlayer.id) { try { db.prepare('INSERT INTO visited_rooms (user_id, room_id, last_visited_at) VALUES (?, ?, datetime(\'now\')) ON CONFLICT(user_id, room_id) DO UPDATE SET last_visited_at = excluded.last_visited_at').run(rejoinedPlayer && rejoinedPlayer.id, newRoom.gameId); } catch(e) {} }
           const reGameEnter = {
             type: 'game_enter',
-            packet: ws.packetCounter++,
+
             game_id: newRoom.gameId,
             bottle_type: newRoom.bottleType || 'vipbottle',
             participants: [rejoinedPlayer, ...others]
           };
-          ws.send(encodeMessage(reGameEnter));
+          sendGame(ws, reGameEnter);
           if (newRoom.chatHistory && newRoom.chatHistory.length > 0) {
             const cleanHistorySwitch = newRoom.chatHistory.map(function(histMsg) {
               const freshMsg = Object.assign({}, histMsg);
               delete freshMsg.packet;
               return freshMsg;
             });
-            ws.send(encodeMessage({ type: 'game_chat_history', messages: cleanHistorySwitch, packet: ws.packetCounter = (ws.packetCounter || 1000) + 1 }));
+            sendGame(ws, { type: 'game_chat_history', messages: cleanHistorySwitch, });
           }
-          console.log('WS: yeni masa - ' + newRoom.gameId + ' oyuncu sayi: ' + newRoom.players.size);
+          DEBUG_GAME_LOGS && debugGame('WS: yeni masa - ' + newRoom.gameId + ' oyuncu sayi: ' + newRoom.players.size);
           broadcastToRoom(newRoom, ws, { type: 'game_join', user: rejoinedPlayer });
           startBottleTurn(newRoom);
           if (newRoom.currentSong && (Date.now() - newRoom.currentSong.start_timestamp) < ((newRoom.currentSong.duration || 240) * 1000)) {
@@ -3454,20 +3489,19 @@ if (msg.type === 'game_chat_message') {
             if (realElapsedSec2 > safeDuration2) {
               songReplay2.start_timestamp = Date.now() - (safeDuration2 * 1000);
             }
-            songReplay2.packet = ws.packetCounter++;
-            ws.send(encodeMessage(songReplay2));
+            sendGame(ws, songReplay2);
           }
         }
       } else if (msg.type === 'goto_specific_room' || msg.type === 'goto_history' || msg.type === 'goto_view_table') {
         if (msg.type !== 'goto_specific_room') msg.room_id = msg.game_id;
-        console.log('WS: goto_specific_room alindi - target=' + msg.room_id);
+        DEBUG_GAME_LOGS && debugGame('WS: goto_specific_room alindi - target=' + msg.room_id);
         const targetRoomId = Number(msg.room_id);
         let targetRoom = rooms.get(targetRoomId);
         if (!targetRoom && targetRoomId > 0) {
           targetRoom = { gameId: targetRoomId, players: new Map(), stickedGifts: new Map() };
           rooms.set(targetRoomId, targetRoom);
           if (targetRoomId >= nextGameId) nextGameId = targetRoomId + 1;
-          console.log('WS: yeni masa avtomatik yaradildi - masa=' + targetRoomId);
+          DEBUG_GAME_LOGS && debugGame('WS: yeni masa avtomatik yaradildi - masa=' + targetRoomId);
         }
         if (targetRoom && targetRoom.players.size < MAX_SEATS) {
           if (ws.gameRoom) {
@@ -3489,7 +3523,7 @@ if (msg.type === 'game_chat_message') {
             const othersX = [];
             targetRoom.players.forEach(p => othersX.push(p));
             if (wsUser && isKickedFromRoom(wsUser.id, targetRoom.gameId)) {
-              ws.send(encodeMessage({ type: 'kickout_info', kickout_ts: wsUser.kicked_until, packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+              sendGame(ws, { type: 'kickout_info', kickout_ts: wsUser.kicked_until, });
               return;
             }
             targetRoom.players.set(ws, rejoinedPlayerX);
@@ -3498,21 +3532,21 @@ if (msg.type === 'game_chat_message') {
         if (rejoinedPlayerX && rejoinedPlayerX.id) { try { db.prepare('INSERT INTO visited_rooms (user_id, room_id, last_visited_at) VALUES (?, ?, datetime(\'now\')) ON CONFLICT(user_id, room_id) DO UPDATE SET last_visited_at = excluded.last_visited_at').run(rejoinedPlayerX && rejoinedPlayerX.id, targetRoom.gameId); } catch(e) {} }
             const reGameEnterX = {
               type: 'game_enter',
-              packet: ws.packetCounter++,
+
               game_id: targetRoom.gameId,
               bottle_type: targetRoom.bottleType || 'vipbottle',
               participants: [rejoinedPlayerX, ...othersX]
             };
-            ws.send(encodeMessage(reGameEnterX));
+            sendGame(ws, reGameEnterX);
             if (targetRoom.chatHistory && targetRoom.chatHistory.length > 0) {
               const cleanHistoryX = targetRoom.chatHistory.map(function(histMsg) {
                 const freshMsg = Object.assign({}, histMsg);
                 delete freshMsg.packet;
                 return freshMsg;
               });
-              ws.send(encodeMessage({ type: 'game_chat_history', messages: cleanHistoryX, packet: ws.packetCounter = (ws.packetCounter || 1000) + 1 }));
+              sendGame(ws, { type: 'game_chat_history', messages: cleanHistoryX, });
             }
-            console.log('WS: konkret masaya qowuldu - masa=' + targetRoom.gameId);
+            DEBUG_GAME_LOGS && debugGame('WS: konkret masaya qowuldu - masa=' + targetRoom.gameId);
             broadcastToRoom(targetRoom, ws, { type: 'game_join', user: rejoinedPlayerX });
             if (targetRoom.currentSong && (Date.now() - targetRoom.currentSong.start_timestamp) < ((targetRoom.currentSong.duration || 240) * 1000)) {
               const songReplayX = Object.assign({}, targetRoom.currentSong);
@@ -3523,21 +3557,19 @@ if (msg.type === 'game_chat_message') {
               }
               setTimeout(() => {
                 if (ws.readyState !== 1) return;
-                if (!ws.packetCounter) ws.packetCounter = 1000;
-                songReplayX.packet = ws.packetCounter++;
-                ws.send(encodeMessage(songReplayX));
+                sendGame(ws, songReplayX);
               }, 1500);
             }
             startBottleTurn(targetRoom);
           }
         } else {
-          ws.send(encodeMessage({ type: 'room_join_error', reason: targetRoom ? 'room_full' : 'room_not_found', packet: ws.packetCounter = (ws.packetCounter || 1000) + 1 }));
+          sendGame(ws, { type: 'room_join_error', reason: targetRoom ? 'room_full' : 'room_not_found', });
         }
       } else if (msg.type === 'start_live') {
-    if (!wsUser) { ws.send(encodeMessage({ type: 'live_error', reason: 'not_logged_in', packet: ws.packetCounter=(ws.packetCounter||1000)+1 })); return; }
+    if (!wsUser) { sendGame(ws, { type: 'live_error', reason: 'not_logged_in', }); return; }
     const roomId = normalizeLiveRoomId(msg.room_id);
     if (roomId && getLiveRoomStream(roomId)) {
-      ws.send(encodeMessage({ type: 'live_error', reason: 'room_busy', room_id: roomId, packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+      sendGame(ws, { type: 'live_error', reason: 'room_busy', room_id: roomId, });
       return;
     }
     const streamId = nextStreamId++;
@@ -3559,19 +3591,19 @@ if (msg.type === 'game_chat_message') {
     };
     liveStreamsMap.set(streamId, stream);
     ws.liveStreamId = streamId;
-    ws.send(encodeMessage({ type: 'live_started', stream_id: streamId, host_id: String(wsUser.id), host_name: hostSeat.name,
-      host_photo: hostSeat.photo, photo_url: hostSeat.livePhotoUrl || hostSeat.photoData || '', room_id: roomId, packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
-    console.log('WS: canli yayim baslandi - ' + hostSeat.name + ' id=' + streamId);
+    sendGame(ws, { type: 'live_started', stream_id: streamId, host_id: String(wsUser.id), host_name: hostSeat.name,
+      host_photo: hostSeat.photo, photo_url: hostSeat.livePhotoUrl || hostSeat.photoData || '', room_id: roomId, });
+    DEBUG_GAME_LOGS && debugGame('WS: canli yayim baslandi - ' + hostSeat.name + ' id=' + streamId);
 } else if (msg.type === 'stop_live') {
     const streamId = ws.liveStreamId;
     const stream = streamId ? liveStreamsMap.get(streamId) : null;
     if (stream && wsUser && stream.hostId === wsUser.id) {
       cancelPkForStream(streamId, 'host_ended_live');
       const endMsg = { type: 'live_ended', stream_id: streamId };
-      stream.seats.forEach(seat => { if (seat.userId !== wsUser.id) try { seat.ws.send(encodeMessage(Object.assign({}, endMsg, { packet: seat.ws.packetCounter=(seat.ws.packetCounter||1000)+1 }))); } catch(e) {} });
-      stream.viewers.forEach((uid, vws) => { try { vws.send(encodeMessage(Object.assign({}, endMsg, { packet: vws.packetCounter=(vws.packetCounter||1000)+1 }))); } catch(e) {} });
+      stream.seats.forEach(seat => { if (seat.userId !== wsUser.id) try { sendGame(seat.ws, endMsg); } catch(e) {} });
+      stream.viewers.forEach((uid, vws) => { try { sendGame(vws, endMsg); } catch(e) {} });
       liveStreamsMap.delete(streamId);
-      console.log('WS: canli yayim bitdi - id=' + streamId);
+      DEBUG_GAME_LOGS && debugGame('WS: canli yayim bitdi - id=' + streamId);
     }
     ws.liveStreamId = null;
 } else if (msg.type === 'get_live_list') {
@@ -3583,11 +3615,11 @@ if (msg.type === 'game_chat_message') {
       const host = s.seats.get(s.hostId);
       list.push({ id: s.id, name: host ? host.name : '', photo: host ? (host.livePhotoUrl || host.photo) : '', has_camera: host ? host.hasCamera : false, viewer_count: s.viewers.size, seat_count: s.seats.size, likes: s.likes, mode: s.mode, room_id: s.roomId || '', pk_active: Boolean(s.pk) });
     });
-    ws.send(encodeMessage({ type: 'live_list', streams: list, packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+    sendGame(ws, { type: 'live_list', streams: list, });
 } else if (msg.type === 'get_broadcaster_leaderboard') {
     const period = ['daily','weekly','monthly'].includes(msg.period) ? msg.period : 'daily';
-    ws.send(encodeMessage({ type:'broadcaster_leaderboard', period, list:broadcasterLeaderboard(period),
-      packet:ws.packetCounter=(ws.packetCounter||1000)+1 }));
+    sendGame(ws, { type:'broadcaster_leaderboard', period, list:broadcasterLeaderboard(period),
+      });
 } else if (msg.type === 'get_live_viewers') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
     if (!stream || !wsUser || stream.hostId !== wsUser.id) return;
@@ -3600,7 +3632,7 @@ if (msg.type === 'game_chat_message') {
       viewers.push({ user_id: String(user.id), name: user.display_name || user.username,
         photo: user.avatar_data ? ('/api/avatar/' + user.id) : '' });
     });
-    ws.send(encodeMessage({ type: 'live_viewers_list', viewers, packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+    sendGame(ws, { type: 'live_viewers_list', viewers, });
 } else if (msg.type === 'request_live_seat') {
     const stream=liveStreamsMap.get(Number(msg.stream_id));
     if(!stream||!wsUser||!stream.viewers.has(ws))return;
@@ -3618,19 +3650,18 @@ if (msg.type === 'game_chat_message') {
     const stream = Number.isFinite(requestedStreamId) && requestedStreamId > 0
       ? liveStreamsMap.get(requestedStreamId)
       : (requestedRoomId ? getLiveRoomStream(requestedRoomId) : null);
-    if (!stream) { ws.send(encodeMessage({ type: 'live_error', reason: 'not_found', room_id: requestedRoomId, packet: ws.packetCounter=(ws.packetCounter||1000)+1 })); return; }
-    if (wsUser && stream.blockedUsers && stream.blockedUsers.has(wsUser.id)) { ws.send(encodeMessage({ type: 'live_error', reason: 'blocked', packet: ws.packetCounter=(ws.packetCounter||1000)+1 })); return; }
+    if (!stream) { sendGame(ws, { type: 'live_error', reason: 'not_found', room_id: requestedRoomId, }); return; }
+    if (wsUser && stream.blockedUsers && stream.blockedUsers.has(wsUser.id)) { sendGame(ws, { type: 'live_error', reason: 'blocked', }); return; }
     const viewerId = wsUser ? wsUser.id : ('guest_' + Math.random().toString(36).slice(2));
     stream.viewers.set(ws, viewerId);
     ws.watchingStreamId = stream.id;
     ws.viewerIdInStream = viewerId;
     const seatsInfo = [];
     stream.seats.forEach(seat => seatsInfo.push({ user_id: String(seat.userId), name: seat.name, photo: seat.photo, has_camera: seat.hasCamera, photo_data: seat.livePhotoUrl || seat.photoData }));
-    ws.send(encodeMessage({
+    sendGame(ws, {
       type: 'live_joined', stream_id: stream.id, room_id: stream.roomId || '', seats: seatsInfo, mode: stream.mode, photo_url: (stream.seats.get(stream.hostId)||{}).livePhotoUrl || '', my_viewer_id: String(viewerId), likes: stream.likes, viewer_count: stream.viewers.size,
       chat_history: stream.chatHistory.slice(-30), gift_leaderboard: Array.from(stream.giftSupporters.values()).sort((a,b)=>b.points-a.points).slice(0,50),
-      packet: ws.packetCounter=(ws.packetCounter||1000)+1
-    }));
+      });
     const snapshot = pkSnapshot(stream);
     if (snapshot) {
       liveSend(ws, snapshot);
@@ -3643,42 +3674,42 @@ if (msg.type === 'game_chat_message') {
     const joinedPayload = { type: 'live_user_joined', user_id: String(viewerId), name: joinedName, photo: joinedPhoto,
       viewer_count: stream.viewers.size };
     stream.seats.forEach(seat => {
-      try { seat.ws.send(encodeMessage({ type: 'live_new_viewer', viewer_id: String(viewerId), viewer_count: stream.viewers.size, packet: seat.ws.packetCounter=(seat.ws.packetCounter||1000)+1 })); } catch(e) {}
-      try { seat.ws.send(encodeMessage(Object.assign({}, joinedPayload, { packet: seat.ws.packetCounter=(seat.ws.packetCounter||1000)+1 }))); } catch(e) {}
+      try { sendGame(seat.ws, { type: 'live_new_viewer', viewer_id: String(viewerId), viewer_count: stream.viewers.size, }); } catch(e) {}
+      try { sendGame(seat.ws, joinedPayload); } catch(e) {}
     });
     stream.viewers.forEach((uid, vws) => {
-      try { vws.send(encodeMessage(Object.assign({}, joinedPayload, { packet: vws.packetCounter=(vws.packetCounter||1000)+1 }))); } catch(e) {}
+      try { sendGame(vws, joinedPayload); } catch(e) {}
     });
-    console.log('WS: canli yayima qosuldu - stream=' + stream.id + ' baxan sayi=' + stream.viewers.size);
+    DEBUG_GAME_LOGS && debugGame('WS: canli yayima qosuldu - stream=' + stream.id + ' baxan sayi=' + stream.viewers.size);
 } else if (msg.type === 'leave_live') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
     if (stream && stream.viewers.has(ws)) {
       const viewerId = stream.viewers.get(ws);
       stream.viewers.delete(ws);
       stream.seats.forEach(seat => {
-        try { seat.ws.send(encodeMessage({ type: 'live_viewer_left', viewer_id: String(viewerId), viewer_count: stream.viewers.size, packet: seat.ws.packetCounter=(seat.ws.packetCounter||1000)+1 })); } catch(e) {}
+        try { sendGame(seat.ws, { type: 'live_viewer_left', viewer_id: String(viewerId), viewer_count: stream.viewers.size, }); } catch(e) {}
       });
     }
     ws.watchingStreamId = null;
 } else if (msg.type === 'invite_to_live') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
     if (!stream || !wsUser || stream.hostId !== wsUser.id) return;
-    if (stream.seats.size >= 10) { ws.send(encodeMessage({ type: 'live_error', reason: 'seats_full', packet: ws.packetCounter=(ws.packetCounter||1000)+1 })); return; }
+    if (stream.seats.size >= 10) { sendGame(ws, { type: 'live_error', reason: 'seats_full', }); return; }
     const targetWs = userIdToWs.get(Number(msg.target_user_id));
-    if (!targetWs) { ws.send(encodeMessage({ type: 'live_error', reason: 'user_offline', packet: ws.packetCounter=(ws.packetCounter||1000)+1 })); return; }
+    if (!targetWs) { sendGame(ws, { type: 'live_error', reason: 'user_offline', }); return; }
     const hostSeat = stream.seats.get(stream.hostId);
-    targetWs.send(encodeMessage({ type: 'live_invite', stream_id: stream.id, host_name: hostSeat.name, host_photo: hostSeat.photo, packet: targetWs.packetCounter=(targetWs.packetCounter||1000)+1 }));
-    console.log('WS: canli yayima devet gonderildi - stream=' + stream.id + ' target=' + msg.target_user_id);
+    sendGame(targetWs, { type: 'live_invite', stream_id: stream.id, host_name: hostSeat.name, host_photo: hostSeat.photo, });
+    DEBUG_GAME_LOGS && debugGame('WS: canli yayima devet gonderildi - stream=' + stream.id + ' target=' + msg.target_user_id);
 } else if (msg.type === 'respond_to_invite') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
     if (!stream || !wsUser) return;
     if (stream.blockedUsers && stream.blockedUsers.has(wsUser.id)) return;
     if (!msg.accept) {
       const hostSeat0 = stream.seats.get(stream.hostId);
-      if (hostSeat0) try { hostSeat0.ws.send(encodeMessage({ type: 'live_invite_declined', user_name: wsUser.display_name || wsUser.username, packet: hostSeat0.ws.packetCounter=(hostSeat0.ws.packetCounter||1000)+1 })); } catch(e) {}
+      if (hostSeat0) try { sendGame(hostSeat0.ws, { type: 'live_invite_declined', user_name: wsUser.display_name || wsUser.username, }); } catch(e) {}
       return;
     }
-    if (stream.seats.size >= 10) { ws.send(encodeMessage({ type: 'live_error', reason: 'seats_full', packet: ws.packetCounter=(ws.packetCounter||1000)+1 })); return; }
+    if (stream.seats.size >= 10) { sendGame(ws, { type: 'live_error', reason: 'seats_full', }); return; }
     const newSeat = { ws, userId: wsUser.id, name: wsUser.display_name || wsUser.username, photo: wsUser.avatar_data ? ('/api/avatar/' + wsUser.id) : '', hasCamera: Boolean(msg.has_camera), photoData: msg.photo_url || (typeof msg.photo_data === 'string' && msg.photo_data.length < 4096 ? msg.photo_data : null), livePhotoUrl: typeof msg.photo_url === 'string' ? msg.photo_url : '' };
     stream.viewers.delete(ws);
     ws.watchingStreamId = null;
@@ -3688,15 +3719,15 @@ if (msg.type === 'game_chat_message') {
     stream.seats.forEach(s => { if (s.userId !== wsUser.id) existingSeats.push({ user_id: String(s.userId), name: s.name, photo: s.photo, has_camera: s.hasCamera, photo_data: s.photoData }); });
     const existingViewerIds = [];
     stream.viewers.forEach((uid) => existingViewerIds.push(String(uid)));
-    ws.send(encodeMessage({ type: 'live_seat_joined_self', stream_id: stream.id, existing_seats: existingSeats, existing_viewer_ids: existingViewerIds, packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+    sendGame(ws, { type: 'live_seat_joined_self', stream_id: stream.id, existing_seats: existingSeats, existing_viewer_ids: existingViewerIds, });
     stream.seats.forEach(seat => {
       if (seat.userId === wsUser.id) return;
-      try { seat.ws.send(encodeMessage({ type: 'live_new_seat', user_id: String(wsUser.id), name: newSeat.name, photo: newSeat.photo, has_camera: newSeat.hasCamera, photo_data: newSeat.livePhotoUrl || newSeat.photoData, photo_url: newSeat.livePhotoUrl || '', packet: seat.ws.packetCounter=(seat.ws.packetCounter||1000)+1 })); } catch(e) {}
+      try { sendGame(seat.ws, { type: 'live_new_seat', user_id: String(wsUser.id), name: newSeat.name, photo: newSeat.photo, has_camera: newSeat.hasCamera, photo_data: newSeat.livePhotoUrl || newSeat.photoData, photo_url: newSeat.livePhotoUrl || '', }); } catch(e) {}
     });
     stream.viewers.forEach((uid, vws) => {
-      try { vws.send(encodeMessage({ type: 'live_new_seat', user_id: String(wsUser.id), name: newSeat.name, photo: newSeat.photo, has_camera: newSeat.hasCamera, photo_data: newSeat.livePhotoUrl || newSeat.photoData, photo_url: newSeat.livePhotoUrl || '', packet: vws.packetCounter=(vws.packetCounter||1000)+1 })); } catch(e) {}
+      try { sendGame(vws, { type: 'live_new_seat', user_id: String(wsUser.id), name: newSeat.name, photo: newSeat.photo, has_camera: newSeat.hasCamera, photo_data: newSeat.livePhotoUrl || newSeat.photoData, photo_url: newSeat.livePhotoUrl || '', }); } catch(e) {}
     });
-    console.log('WS: yeni qonaq canli yayima qosuldu - stream=' + stream.id + ' user=' + wsUser.username);
+    DEBUG_GAME_LOGS && debugGame('WS: yeni qonaq canli yayima qosuldu - stream=' + stream.id + ' user=' + wsUser.username);
 } else if (msg.type === 'leave_seat') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
     if (!stream || !wsUser || !stream.seats.has(wsUser.id)) return;
@@ -3704,10 +3735,10 @@ if (msg.type === 'game_chat_message') {
     stream.seats.delete(wsUser.id);
     ws.liveStreamId = null;
     stream.seats.forEach(seat => {
-      try { seat.ws.send(encodeMessage({ type: 'live_seat_left', user_id: String(wsUser.id), packet: seat.ws.packetCounter=(seat.ws.packetCounter||1000)+1 })); } catch(e) {}
+      try { sendGame(seat.ws, { type: 'live_seat_left', user_id: String(wsUser.id), }); } catch(e) {}
     });
     stream.viewers.forEach((uid, vws) => {
-      try { vws.send(encodeMessage({ type: 'live_seat_left', user_id: String(wsUser.id), packet: vws.packetCounter=(vws.packetCounter||1000)+1 })); } catch(e) {}
+      try { sendGame(vws, { type: 'live_seat_left', user_id: String(wsUser.id), }); } catch(e) {}
     });
 } else if (msg.type === 'webrtc_offer' || msg.type === 'webrtc_answer' || msg.type === 'webrtc_ice') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
@@ -3733,11 +3764,11 @@ if (msg.type === 'game_chat_message') {
     if (!targetWs) return;
     const fromId = wsUser ? String(wsUser.id) : (ws.viewerIdInStream ? String(ws.viewerIdInStream) : 'guest');
     if (msg.type === 'webrtc_offer') {
-      targetWs.send(encodeMessage({ type: 'webrtc_offer', sdp: msg.sdp, from_id: fromId, packet: targetWs.packetCounter=(targetWs.packetCounter||1000)+1 }));
+      sendGame(targetWs, { type: 'webrtc_offer', sdp: msg.sdp, from_id: fromId, });
     } else if (msg.type === 'webrtc_answer') {
-      targetWs.send(encodeMessage({ type: 'webrtc_answer', sdp: msg.sdp, from_id: fromId, packet: targetWs.packetCounter=(targetWs.packetCounter||1000)+1 }));
+      sendGame(targetWs, { type: 'webrtc_answer', sdp: msg.sdp, from_id: fromId, });
     } else if (msg.type === 'webrtc_ice') {
-      targetWs.send(encodeMessage({ type: 'webrtc_ice', candidate: msg.candidate, from_id: fromId, packet: targetWs.packetCounter=(targetWs.packetCounter||1000)+1 }));
+      sendGame(targetWs, { type: 'webrtc_ice', candidate: msg.candidate, from_id: fromId, });
     }
 } else if (msg.type === 'live_chat') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
@@ -3750,23 +3781,23 @@ if (msg.type === 'game_chat_message') {
     stream.chatHistory.push(chatMsg);
     if (stream.chatHistory.length > 50) stream.chatHistory.shift();
     const payload = { type:'live_chat',name:chatMsg.name,photo:chatMsg.photo,level:chatMsg.level,badge:chatMsg.badge,text:chatMsg.text };
-    stream.seats.forEach(seat => { try { seat.ws.send(encodeMessage(Object.assign({}, payload, { packet: seat.ws.packetCounter=(seat.ws.packetCounter||1000)+1 }))); } catch(e) {} });
-    stream.viewers.forEach((uid, vws) => { try { vws.send(encodeMessage(Object.assign({}, payload, { packet: vws.packetCounter=(vws.packetCounter||1000)+1 }))); } catch(e) {} });
+    stream.seats.forEach(seat => { try { sendGame(seat.ws, payload); } catch(e) {} });
+    stream.viewers.forEach((uid, vws) => { try { sendGame(vws, payload); } catch(e) {} });
 } else if (msg.type === 'live_like') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
     if (!stream) return;
     stream.likes++;
     const payload = { type: 'live_likes', likes: stream.likes };
-    stream.seats.forEach(seat => { try { seat.ws.send(encodeMessage(Object.assign({}, payload, { packet: seat.ws.packetCounter=(seat.ws.packetCounter||1000)+1 }))); } catch(e) {} });
-    stream.viewers.forEach((uid, vws) => { try { vws.send(encodeMessage(Object.assign({}, payload, { packet: vws.packetCounter=(vws.packetCounter||1000)+1 }))); } catch(e) {} });
+    stream.seats.forEach(seat => { try { sendGame(seat.ws, payload); } catch(e) {} });
+    stream.viewers.forEach((uid, vws) => { try { sendGame(vws, payload); } catch(e) {} });
 } else if (msg.type === 'toggle_mic') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
     if (!stream || !wsUser || !stream.seats.has(wsUser.id)) return;
     const seat = stream.seats.get(wsUser.id);
     seat.muted = Boolean(msg.muted);
     const payload = { type: 'live_mic_state', user_id: String(wsUser.id), muted: seat.muted };
-    stream.seats.forEach(s => { if (s.userId !== wsUser.id) try { s.ws.send(encodeMessage(Object.assign({}, payload, { packet: s.ws.packetCounter=(s.ws.packetCounter||1000)+1 }))); } catch(e) {} });
-    stream.viewers.forEach((uid, vws) => { try { vws.send(encodeMessage(Object.assign({}, payload, { packet: vws.packetCounter=(vws.packetCounter||1000)+1 }))); } catch(e) {} });
+    stream.seats.forEach(s => { if (s.userId !== wsUser.id) try { sendGame(s.ws, payload); } catch(e) {} });
+    stream.viewers.forEach((uid, vws) => { try { sendGame(vws, payload); } catch(e) {} });
 } else if (msg.type === 'toggle_camera') {
     const stream=liveStreamsMap.get(Number(msg.stream_id));
     if(!stream||!wsUser||!stream.seats.has(wsUser.id))return;
@@ -3783,16 +3814,16 @@ if (msg.type === 'game_chat_message') {
     if (stream.seats.has(targetId)) {
       const seat = stream.seats.get(targetId);
       stream.seats.delete(targetId);
-      try { seat.ws.send(encodeMessage({ type: 'live_blocked', stream_id: stream.id, packet: seat.ws.packetCounter=(seat.ws.packetCounter||1000)+1 })); } catch(e) {}
-      stream.seats.forEach(s => { try { s.ws.send(encodeMessage({ type: 'live_seat_left', user_id: String(targetId), packet: s.ws.packetCounter=(s.ws.packetCounter||1000)+1 })); } catch(e) {} });
+      try { sendGame(seat.ws, { type: 'live_blocked', stream_id: stream.id, }); } catch(e) {}
+      stream.seats.forEach(s => { try { sendGame(s.ws, { type: 'live_seat_left', user_id: String(targetId), }); } catch(e) {} });
     }
     stream.viewers.forEach((uid, vws) => {
       if (Number(uid) === targetId) {
         stream.viewers.delete(vws);
-        try { vws.send(encodeMessage({ type: 'live_blocked', stream_id: stream.id, packet: vws.packetCounter=(vws.packetCounter||1000)+1 })); } catch(e) {}
+        try { sendGame(vws, { type: 'live_blocked', stream_id: stream.id, }); } catch(e) {}
       }
     });
-    console.log('WS: istifadeci canli yayimdan blok edildi - stream=' + stream.id + ' target=' + targetId);
+    DEBUG_GAME_LOGS && debugGame('WS: istifadeci canli yayimdan blok edildi - stream=' + stream.id + ' target=' + targetId);
 } else if (msg.type === 'unblock_user') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
     if (!stream || !wsUser || stream.hostId !== wsUser.id) return;
@@ -3803,8 +3834,8 @@ if (msg.type === 'game_chat_message') {
     if (!stream.moderators) stream.moderators = new Set();
     stream.moderators.add(Number(msg.target_user_id));
     const targetWs = userIdToWs.get(Number(msg.target_user_id));
-    if (targetWs) try { targetWs.send(encodeMessage({ type: 'live_made_moderator', stream_id: stream.id, packet: targetWs.packetCounter=(targetWs.packetCounter||1000)+1 })); } catch(e) {}
-    console.log('WS: moderator tayin edildi - stream=' + stream.id + ' target=' + msg.target_user_id);
+    if (targetWs) try { sendGame(targetWs, { type: 'live_made_moderator', stream_id: stream.id, }); } catch(e) {}
+    DEBUG_GAME_LOGS && debugGame('WS: moderator tayin edildi - stream=' + stream.id + ' target=' + msg.target_user_id);
 } else if (msg.type === 'remove_moderator') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
     if (!stream || !wsUser || stream.hostId !== wsUser.id) return;
@@ -3819,18 +3850,18 @@ if (msg.type === 'game_chat_message') {
     if (stream.seats.has(targetId)) {
       const seat = stream.seats.get(targetId);
       stream.seats.delete(targetId);
-      try { seat.ws.send(encodeMessage({ type: 'live_kicked', stream_id: stream.id, packet: seat.ws.packetCounter=(seat.ws.packetCounter||1000)+1 })); } catch(e) {}
-      stream.seats.forEach(s => { try { s.ws.send(encodeMessage({ type: 'live_seat_left', user_id: String(targetId), packet: s.ws.packetCounter=(s.ws.packetCounter||1000)+1 })); } catch(e) {} });
-      stream.viewers.forEach((uid, vws) => { try { vws.send(encodeMessage({ type: 'live_seat_left', user_id: String(targetId), packet: vws.packetCounter=(vws.packetCounter||1000)+1 })); } catch(e) {} });
+      try { sendGame(seat.ws, { type: 'live_kicked', stream_id: stream.id, }); } catch(e) {}
+      stream.seats.forEach(s => { try { sendGame(s.ws, { type: 'live_seat_left', user_id: String(targetId), }); } catch(e) {} });
+      stream.viewers.forEach((uid, vws) => { try { sendGame(vws, { type: 'live_seat_left', user_id: String(targetId), }); } catch(e) {} });
     } else {
       stream.viewers.forEach((uid, vws) => {
         if (Number(uid) === targetId) {
           stream.viewers.delete(vws);
-          try { vws.send(encodeMessage({ type: 'live_kicked', stream_id: stream.id, packet: vws.packetCounter=(vws.packetCounter||1000)+1 })); } catch(e) {}
+          try { sendGame(vws, { type: 'live_kicked', stream_id: stream.id, }); } catch(e) {}
         }
       });
     }
-    console.log('WS: istifadeci canli yayimdan qovuldu - stream=' + stream.id + ' target=' + targetId);
+    DEBUG_GAME_LOGS && debugGame('WS: istifadeci canli yayimdan qovuldu - stream=' + stream.id + ' target=' + targetId);
 } else if (msg.type === 'mute_user') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
     if (!stream || !wsUser) return;
@@ -3840,17 +3871,17 @@ if (msg.type === 'game_chat_message') {
     const seat = stream.seats.get(targetId);
     if (!seat) return;
     seat.muted = true;
-    try { seat.ws.send(encodeMessage({ type: 'live_force_muted', stream_id: stream.id, packet: seat.ws.packetCounter=(seat.ws.packetCounter||1000)+1 })); } catch(e) {}
+    try { sendGame(seat.ws, { type: 'live_force_muted', stream_id: stream.id, }); } catch(e) {}
     const payload = { type: 'live_mic_state', user_id: String(targetId), muted: true };
-    stream.seats.forEach(s => { if (s.userId !== targetId) try { s.ws.send(encodeMessage(Object.assign({}, payload, { packet: s.ws.packetCounter=(s.ws.packetCounter||1000)+1 }))); } catch(e) {} });
-    stream.viewers.forEach((uid, vws) => { try { vws.send(encodeMessage(Object.assign({}, payload, { packet: vws.packetCounter=(vws.packetCounter||1000)+1 }))); } catch(e) {} });
-    console.log('WS: istifadeci susduruldu - stream=' + stream.id + ' target=' + targetId);
+    stream.seats.forEach(s => { if (s.userId !== targetId) try { sendGame(s.ws, payload); } catch(e) {} });
+    stream.viewers.forEach((uid, vws) => { try { sendGame(vws, payload); } catch(e) {} });
+    DEBUG_GAME_LOGS && debugGame('WS: istifadeci susduruldu - stream=' + stream.id + ' target=' + targetId);
 } else if (msg.type === 'live_send_gift') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
     if (!stream || !wsUser) return;
     const gift = liveGiftCatalogMap.get(String(msg.gift_id));
     if (!gift) {
-      ws.send(encodeMessage({ type: 'live_error', reason: 'invalid_gift_id', packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+      sendGame(ws, { type: 'live_error', reason: 'invalid_gift_id', });
       return;
     }
     const giftPrice = Math.max(1, Number(gift.diamond_count) || 1);
@@ -3867,7 +3898,7 @@ if (msg.type === 'game_chat_message') {
     const charged = db.prepare('UPDATE users SET live_tokens = live_tokens - ?, gift_level_score = gift_level_score + ? WHERE id = ? AND live_tokens >= ?')
       .run(giftPrice, giftPrice, wsUser.id, giftPrice);
     if (!charged.changes) {
-      ws.send(encodeMessage({ type: 'live_error', reason: 'insufficient_tokens', packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+      sendGame(ws, { type: 'live_error', reason: 'insufficient_tokens', });
       return;
     }
     const updatedTok = db.prepare('SELECT live_tokens, gift_level_score FROM users WHERE id = ?').get(wsUser.id);
@@ -3876,7 +3907,7 @@ if (msg.type === 'game_chat_message') {
     recordBroadcasterGift(targetId, giftPrice);
     const targetBalance = db.prepare('SELECT live_tokens FROM users WHERE id = ?').get(targetId);
     if (targetBalance && targetSeat.ws) liveSend(targetSeat.ws,{type:'live_tokens_update',live_tokens:targetBalance.live_tokens});
-    ws.send(encodeMessage({ type: 'live_tokens_update', live_tokens: updatedTok.live_tokens, packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+    sendGame(ws, { type: 'live_tokens_update', live_tokens: updatedTok.live_tokens, });
     const giftEffectId = liveGiftEffectMap.get(String(msg.gift_id)) || null;
     if (giftEffectId) grantGiftMedia(stream, giftEffectId);
     const payload = { type: 'live_gift_received', gift_id: gift.id, gift_name: gift.name, gift_price: giftPrice, gift_image: gift.icon,
@@ -3886,8 +3917,8 @@ if (msg.type === 'game_chat_message') {
     const supporterKey=String(wsUser.id),supporter=stream.giftSupporters.get(supporterKey)||{user_id:supporterKey,name:wsUser.display_name||wsUser.username,photo:wsUser.avatar_data?('/api/avatar/'+wsUser.id):'',points:0,level:senderLevel};
     supporter.points+=giftPrice;supporter.level=senderLevel;stream.giftSupporters.set(supporterKey,supporter);
     const giftLeaderboard=Array.from(stream.giftSupporters.values()).sort((a,b)=>b.points-a.points).slice(0,50);
-    stream.seats.forEach(seat => { try { seat.ws.send(encodeMessage(Object.assign({}, payload, { packet: seat.ws.packetCounter=(seat.ws.packetCounter||1000)+1 }))); } catch(e) {} });
-    stream.viewers.forEach((uid, vws) => { try { vws.send(encodeMessage(Object.assign({}, payload, { packet: vws.packetCounter=(vws.packetCounter||1000)+1 }))); } catch(e) {} });
+    stream.seats.forEach(seat => { try { sendGame(seat.ws, payload); } catch(e) {} });
+    stream.viewers.forEach((uid, vws) => { try { sendGame(vws, payload); } catch(e) {} });
     liveBroadcast(stream,{type:'live_gift_leaderboard',supporters:giftLeaderboard});
     for (const period of ['daily','weekly','monthly']) {
       const rankPayload={type:'broadcaster_leaderboard',period,list:broadcasterLeaderboard(period)};
@@ -3920,7 +3951,7 @@ if (msg.type === 'game_chat_message') {
           contribution: session.supporters[supporterId] });
       }
     }
-    console.log('WS: canli hediyye gonderildi - stream=' + stream.id + ' gift=' + msg.gift_id + ' price=' + giftPrice);
+    DEBUG_GAME_LOGS && debugGame('WS: canli hediyye gonderildi - stream=' + stream.id + ' gift=' + msg.gift_id + ' price=' + giftPrice);
 } else if (msg.type === 'start_pk') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
     if (!stream || !wsUser || stream.hostId !== wsUser.id) return;
@@ -3942,7 +3973,7 @@ if (msg.type === 'game_chat_message') {
     liveSend(oppHost.ws, { type: 'pk_invite', invite_id: inviteId, requester_stream_id: stream.id,
       host_name: host.name, host_photo: host.photo, expires_at: invite.expiresAt });
     liveSend(ws, { type: 'pk_invite_sent', invite_id: inviteId, opponent_stream_id: oppStream.id, expires_at: invite.expiresAt });
-    console.log('WS: PK devet gonderildi - stream=' + stream.id + ' -> ' + oppStream.id);
+    DEBUG_GAME_LOGS && debugGame('WS: PK devet gonderildi - stream=' + stream.id + ' -> ' + oppStream.id);
 } else if (msg.type === 'respond_pk') {
     const stream = liveStreamsMap.get(Number(msg.stream_id));
     if (!stream || !wsUser || stream.hostId !== wsUser.id) return;
@@ -3970,7 +4001,7 @@ if (msg.type === 'game_chat_message') {
     liveBroadcast(stream, pkSnapshot(stream));
     requesterStream.viewers.forEach((uid) => liveSend(hostB.ws, { type: 'live_new_viewer', viewer_id: String(uid) }));
     stream.viewers.forEach((uid) => liveSend(hostA.ws, { type: 'live_new_viewer', viewer_id: String(uid) }));
-    console.log('WS: PK basladi - ' + requesterStream.id + ' vs ' + stream.id);
+    DEBUG_GAME_LOGS && debugGame('WS: PK basladi - ' + requesterStream.id + ' vs ' + stream.id);
     session.countdownTimer = setTimeout(() => {
       if (!pkSessions.has(pkId) || session.phase !== 'countdown') return;
       session.phase = 'battle';
@@ -3985,7 +4016,7 @@ if (msg.type === 'game_chat_message') {
     if (!wsUser || !Boolean(wsUser.is_vip) || !ws.gameRoom) return;
     const kickerCrystalsRow = db.prepare('SELECT crystals FROM users WHERE id = ?').get(wsUser.id);
     if (!kickerCrystalsRow || (kickerCrystalsRow.crystals || 0) < 60) {
-      ws.send(encodeMessage({ type: 'live_error', reason: 'insufficient_crystals', packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+      sendGame(ws, { type: 'live_error', reason: 'insufficient_crystals', });
       return;
     }
     db.prepare('UPDATE users SET crystals = crystals - 60 WHERE id = ?').run(wsUser.id);
@@ -4010,7 +4041,7 @@ if (msg.type === 'game_chat_message') {
         unkick_ts: rejoinUntilMs,
         game_id: room.gameId
       });
-      
+
       if (targetWsKO.gameRoom) removePlayerFromRoom(targetWsKO.gameRoom, targetWsKO);
       let moveNewRoom = null;
       for (const r of rooms.values()) { if (r.gameId !== room.gameId && r.players.size < MAX_SEATS) { moveNewRoom = r; break; } }
@@ -4023,19 +4054,19 @@ if (msg.type === 'game_chat_message') {
         moveNewRoom.players.set(targetWsKO, movedPlayer);
         targetWsKO.gameRoom = moveNewRoom;
         targetWsKO.gamePlayer = movedPlayer;
-        targetWsKO.send(encodeMessage({
+        sendGame(targetWsKO, {
           type: 'game_enter',
-          packet: targetWsKO.packetCounter=(targetWsKO.packetCounter||1000)+1,
+
           game_id: moveNewRoom.gameId,
           bottle_type: moveNewRoom.bottleType || 'vipbottle',
           participants: [movedPlayer, ...moveExisting],
           abtest: { kickout: true },
           kickout_info: { price: 60, refresh_ms: 60000 }
-        }));
+        });
         broadcastToRoom(moveNewRoom, targetWsKO, { type: 'game_join', user: movedPlayer });
         startBottleTurn(moveNewRoom);
       }
-      console.log('WS: kickout - istifadeci kenarlasdirildi - target=' + targetIdKO);
+      DEBUG_GAME_LOGS && debugGame('WS: kickout - istifadeci kenarlasdirildi - target=' + targetIdKO);
     }, 30000);
     ws.gameRoom.pendingKickouts.set(targetIdKO, { initiatorId: wsUser.id, timeoutHandle: timeoutHandleKO, deadlineTs: deadlineTsKO });
     broadcastToRoom(ws.gameRoom, null, {
@@ -4045,7 +4076,7 @@ if (msg.type === 'game_chat_message') {
       kickout_ts: deadlineTsKO,
       kickout_info: { price: 60 }
     });
-    console.log('WS: kickout baslandi - initiator=' + wsUser.username + ' target=' + targetIdKO);
+    DEBUG_GAME_LOGS && debugGame('WS: kickout baslandi - initiator=' + wsUser.username + ' target=' + targetIdKO);
 } else if (msg.type === 'user_save') {
     if (!wsUser) return;
     const targetIdSave = Number(msg.user_id);
@@ -4056,12 +4087,12 @@ if (msg.type === 'game_chat_message') {
     }
     if (pending) {
       if (!Boolean(wsUser.is_vip)) {
-        ws.send(encodeMessage({ type: 'live_error', reason: 'vip_required', packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+        sendGame(ws, { type: 'live_error', reason: 'vip_required', });
         return;
       }
       const saverCoinsRow = db.prepare('SELECT coins FROM users WHERE id = ?').get(wsUser.id);
       if (!saverCoinsRow || (saverCoinsRow.coins || 0) < 100) {
-        ws.send(encodeMessage({ type: 'live_error', reason: 'insufficient_coins', packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+        sendGame(ws, { type: 'live_error', reason: 'insufficient_coins', });
         return;
       }
       db.prepare('UPDATE users SET coins = coins - 100 WHERE id = ?').run(wsUser.id);
@@ -4077,12 +4108,12 @@ if (msg.type === 'game_chat_message') {
       saved_user: { id: String(targetIdSave), name: savedPlayer ? savedPlayer.name : '', male: savedPlayer ? savedPlayer.male : true, photo_url: savedPlayer ? (savedPlayer.photo_url || '') : '' },
       kickout_info: { price: 60 }
     });
-    console.log('WS: kickout xilas edildi - saver=' + wsUser.username + ' target=' + targetIdSave);
+    DEBUG_GAME_LOGS && debugGame('WS: kickout xilas edildi - saver=' + wsUser.username + ' target=' + targetIdSave);
 } else if (msg.type === 'kickout_refresh') {
     if (!ws) return;
-    ws.send(encodeMessage({ type: 'kickout_refresh', kickout_info: { price: 60 }, packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+    sendGame(ws, { type: 'kickout_refresh', kickout_info: { price: 60 }, });
 } else if (msg.type === 'goto_user') {
-        console.log('WS: goto_user alindi - target=' + msg.user_id);
+        DEBUG_GAME_LOGS && debugGame('WS: goto_user alindi - target=' + msg.user_id);
         const targetWs = userIdToWs.get(Number(msg.user_id));
         if (targetWs && targetWs.gameRoom && targetWs.gameRoom.players.size < MAX_SEATS) {
           if (ws.gameRoom) {
@@ -4107,7 +4138,7 @@ if (msg.type === 'game_chat_message') {
             const others2 = [];
             destRoom.players.forEach(p => others2.push(p));
             if (wsUser && isKickedFromRoom(wsUser.id, destRoom.gameId)) {
-              ws.send(encodeMessage({ type: 'kickout_info', kickout_ts: wsUser.kicked_until, packet: ws.packetCounter=(ws.packetCounter||1000)+1 }));
+              sendGame(ws, { type: 'kickout_info', kickout_ts: wsUser.kicked_until, });
               return;
             }
             destRoom.players.set(ws, rejoinedPlayer2);
@@ -4116,21 +4147,21 @@ if (msg.type === 'game_chat_message') {
         if (rejoinedPlayer2 && rejoinedPlayer2.id) { try { db.prepare('INSERT INTO visited_rooms (user_id, room_id, last_visited_at) VALUES (?, ?, datetime(\'now\')) ON CONFLICT(user_id, room_id) DO UPDATE SET last_visited_at = excluded.last_visited_at').run(rejoinedPlayer2 && rejoinedPlayer2.id, destRoom.gameId); } catch(e) {} }
             const reGameEnter2 = {
               type: 'game_enter',
-              packet: ws.packetCounter++,
+
               game_id: destRoom.gameId,
               bottle_type: destRoom.bottleType || 'vipbottle',
               participants: [rejoinedPlayer2, ...others2]
             };
-            ws.send(encodeMessage(reGameEnter2));
+            sendGame(ws, reGameEnter2);
           if (destRoom.chatHistory && destRoom.chatHistory.length > 0) {
             const cleanHistorySwitch = destRoom.chatHistory.map(function(histMsg) {
               const freshMsg = Object.assign({}, histMsg);
               delete freshMsg.packet;
               return freshMsg;
             });
-            ws.send(encodeMessage({ type: 'game_chat_history', messages: cleanHistorySwitch, packet: ws.packetCounter = (ws.packetCounter || 1000) + 1 }));
+            sendGame(ws, { type: 'game_chat_history', messages: cleanHistorySwitch, });
           }
-            console.log('WS: fellow-a qowuldu - masa=' + destRoom.gameId);
+            DEBUG_GAME_LOGS && debugGame('WS: fellow-a qowuldu - masa=' + destRoom.gameId);
             broadcastToRoom(destRoom, ws, { type: 'game_join', user: rejoinedPlayer2 });
             startBottleTurn(destRoom);
             if (destRoom.currentSong && (Date.now() - destRoom.currentSong.start_timestamp) < ((destRoom.currentSong.duration || 240) * 1000)) {
@@ -4140,12 +4171,11 @@ if (msg.type === 'game_chat_message') {
               if (realElapsedSec3 > safeDuration3) {
                 songReplay3.start_timestamp = Date.now() - (safeDuration3 * 1000);
               }
-              songReplay3.packet = ws.packetCounter++;
-              ws.send(encodeMessage(songReplay3));
+              sendGame(ws, songReplay3);
             }
           }
         } else {
-          console.log('WS: goto_user - hedef tapilmadi ve ya masa doludur');
+          DEBUG_GAME_LOGS && debugGame('WS: goto_user - hedef tapilmadi ve ya masa doludur');
         }
       } else if (msg.type === 'get_activity_status') {
         if (wsUser) {
@@ -4155,14 +4185,14 @@ if (msg.type === 'game_chat_message') {
           const top5c = db.prepare('SELECT id, username, display_name, daily_message_count FROM users WHERE daily_message_date = ? ORDER BY daily_message_count DESC LIMIT 5').all(today5);
           const topHours = db.prepare('SELECT id, username, display_name, daily_active_seconds FROM users WHERE daily_active_date = ? ORDER BY daily_active_seconds DESC LIMIT 5').all(today5);
           const topMusic = db.prepare('SELECT id, username, display_name, daily_music_count FROM users WHERE daily_music_date = ? ORDER BY daily_music_count DESC LIMIT 5').all(today5);
-          ws.send(encodeMessage({
-            packet: ws.packetCounter = (ws.packetCounter||1000)+1,
+          sendGame(ws, {
+
             type: 'activity_status',
             active_seconds: seconds,
             leaderboard: top5c.map(u => ({ id: String(u.id), name: u.display_name || u.username, count: u.daily_message_count })),
             hour_leaderboard: topHours.map(u => ({ id: String(u.id), name: u.display_name || u.username, seconds: u.daily_active_seconds })),
             music_leaderboard: topMusic.map(u => ({ id: String(u.id), name: u.display_name || u.username, count: u.daily_music_count }))
-          }));
+          });
         }
       } else if (msg.type === 'claim_hour_reward') {
         if (wsUser) {
@@ -4182,22 +4212,22 @@ if (msg.type === 'game_chat_message') {
           if (awarded) {
             claimed.push(awarded.key);
             db.prepare('UPDATE users SET coins = coins + ?, claimed_hour_milestones = ? WHERE id = ?').run(awarded.bonus, claimed.join(','), wsUser.id);
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'hour_reward_claimed', bonus: awarded.bonus, hours: awarded.h }));
-            console.log('WS: saatlik bonus verildi - ' + wsUser.username + ' - ' + awarded.bonus);
+            sendGame(ws, {  type: 'hour_reward_claimed', bonus: awarded.bonus, hours: awarded.h });
+            DEBUG_GAME_LOGS && debugGame('WS: saatlik bonus verildi - ' + wsUser.username + ' - ' + awarded.bonus);
           } else {
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'hour_reward_claimed', bonus: 0 }));
+            sendGame(ws, {  type: 'hour_reward_claimed', bonus: 0 });
           }
         }
       } else if (msg.type === 'get_msg_leaderboard') {
         const today3 = new Date().toISOString().slice(0, 10);
         const top5 = db.prepare('SELECT id, username, display_name, daily_message_count FROM users WHERE daily_message_date = ? ORDER BY daily_message_count DESC LIMIT 5').all(today3);
-        ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'msg_leaderboard', list: top5.map(u => ({ id: String(u.id), name: u.display_name || u.username, count: u.daily_message_count })) }));
+        sendGame(ws, {  type: 'msg_leaderboard', list: top5.map(u => ({ id: String(u.id), name: u.display_name || u.username, count: u.daily_message_count })) });
       } else if (msg.type === 'claim_msg_rank') {
         if (wsUser) {
           const today4 = new Date().toISOString().slice(0, 10);
           const already = db.prepare('SELECT claimed_msg_rank_date FROM users WHERE id = ?').get(wsUser.id);
           if (already && already.claimed_msg_rank_date === today4) {
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'msg_rank_claimed', bonus: 0, reason: 'already_claimed' }));
+            sendGame(ws, {  type: 'msg_rank_claimed', bonus: 0, reason: 'already_claimed' });
           } else {
             const top5b = db.prepare('SELECT id FROM users WHERE daily_message_date = ? ORDER BY daily_message_count DESC LIMIT 5').all(today4);
             const rank = top5b.findIndex(u => u.id === wsUser.id);
@@ -4205,10 +4235,10 @@ if (msg.type === 'game_chat_message') {
             if (rank >= 0) {
               const bonus = rewards[rank];
               db.prepare('UPDATE users SET coins = coins + ?, claimed_msg_rank_date = ? WHERE id = ?').run(bonus, today4, wsUser.id);
-              ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'msg_rank_claimed', bonus: bonus, rank: rank + 1 }));
-              console.log('WS: mesaj reytingi bonusu - ' + wsUser.username + ' - yer=' + (rank + 1) + ' bonus=' + bonus);
+              sendGame(ws, {  type: 'msg_rank_claimed', bonus: bonus, rank: rank + 1 });
+              DEBUG_GAME_LOGS && debugGame('WS: mesaj reytingi bonusu - ' + wsUser.username + ' - yer=' + (rank + 1) + ' bonus=' + bonus);
             } else {
-              ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'msg_rank_claimed', bonus: 0, reason: 'not_in_top5' }));
+              sendGame(ws, {  type: 'msg_rank_claimed', bonus: 0, reason: 'not_in_top5' });
             }
           }
         }
@@ -4218,12 +4248,12 @@ if (msg.type === 'game_chat_message') {
           if (msg.unmute) {
             db.prepare('UPDATE users SET muted_until = NULL WHERE id = ?').run(Number(msg.target_id));
             if (ws.gameRoom) broadcastToRoom(ws.gameRoom, null, { type: 'game_chat', body: 'Moderator ' + (wsUser.display_name || wsUser.username) + ' istifadecini (' + (targetName ? (targetName.display_name || targetName.username) : msg.target_id) + ') sesini acdi', receiver_id: '', receiver_name: '', user: { id: '0', name: 'Sistem', male: true } });
-            console.log('WS: moderator ses acdi - ' + wsUser.username + ' -> ' + msg.target_id);
+            DEBUG_GAME_LOGS && debugGame('WS: moderator ses acdi - ' + wsUser.username + ' -> ' + msg.target_id);
           } else {
             const minutes = Number(msg.minutes) || 10;
             db.prepare("UPDATE users SET muted_until = datetime('now', '+' || ? || ' minutes') WHERE id = ?").run(minutes, Number(msg.target_id));
             if (ws.gameRoom) broadcastToRoom(ws.gameRoom, null, { type: 'game_chat', body: 'Moderator ' + (wsUser.display_name || wsUser.username) + ' istifadecini (' + (targetName ? (targetName.display_name || targetName.username) : msg.target_id) + ') ' + minutes + ' deqiqe susdurdu', receiver_id: '', receiver_name: '', user: { id: '0', name: 'Sistem', male: true } });
-            console.log('WS: moderator susdurdu - ' + wsUser.username + ' -> ' + msg.target_id + ' (' + minutes + 'deq)');
+            DEBUG_GAME_LOGS && debugGame('WS: moderator susdurdu - ' + wsUser.username + ' -> ' + msg.target_id + ' (' + minutes + 'deq)');
           }
         }
       } else if (msg.type === 'mod_giftban') {
@@ -4232,12 +4262,12 @@ if (msg.type === 'game_chat_message') {
           if (msg.unban) {
             db.prepare('UPDATE users SET gift_banned_until = NULL WHERE id = ?').run(Number(msg.target_id));
             if (ws.gameRoom) broadcastToRoom(ws.gameRoom, null, { type: 'game_chat', body: 'Moderator ' + (wsUser.display_name || wsUser.username) + ' istifadecinin (' + (targetName2 ? (targetName2.display_name || targetName2.username) : msg.target_id) + ') hediyye qadagasini acdi', receiver_id: '', receiver_name: '', user: { id: '0', name: 'Sistem', male: true } });
-            console.log('WS: moderator hediyye qadagasi acdi - ' + wsUser.username + ' -> ' + msg.target_id);
+            DEBUG_GAME_LOGS && debugGame('WS: moderator hediyye qadagasi acdi - ' + wsUser.username + ' -> ' + msg.target_id);
           } else {
             const minutes2 = Number(msg.minutes) || 10;
             db.prepare("UPDATE users SET gift_banned_until = datetime('now', '+' || ? || ' minutes') WHERE id = ?").run(minutes2, Number(msg.target_id));
             if (ws.gameRoom) broadcastToRoom(ws.gameRoom, null, { type: 'game_chat', body: 'Moderator ' + (wsUser.display_name || wsUser.username) + ' istifadecinin (' + (targetName2 ? (targetName2.display_name || targetName2.username) : msg.target_id) + ') hediyye gondermesini ' + minutes2 + ' deqiqe qadagan etdi', receiver_id: '', receiver_name: '', user: { id: '0', name: 'Sistem', male: true } });
-            console.log('WS: moderator hediyye qadagasi qoydu - ' + wsUser.username + ' -> ' + msg.target_id);
+            DEBUG_GAME_LOGS && debugGame('WS: moderator hediyye qadagasi qoydu - ' + wsUser.username + ' -> ' + msg.target_id);
           }
         }
       } else if (msg.type === 'mod_kick') {
@@ -4247,27 +4277,27 @@ if (msg.type === 'game_chat_message') {
           db.prepare("UPDATE users SET kicked_until = datetime('now', '+' || ? || ' minutes') WHERE id = ?").run(minutes3, Number(msg.target_id));
           const targetWsKick = userIdToWs.get(Number(msg.target_id));
           if (targetWsKick) {
-            targetWsKick.send(encodeMessage({ packet: targetWsKick.packetCounter = (targetWsKick.packetCounter||1000)+1, type: 'you_are_kicked', minutes: minutes3 }));
+            sendGame(targetWsKick, {  type: 'you_are_kicked', minutes: minutes3 });
             if (targetWsKick.gameRoom) removePlayerFromRoom(targetWsKick.gameRoom, targetWsKick);
           }
           if (ws.gameRoom) broadcastToRoom(ws.gameRoom, null, { type: 'game_chat', body: 'Moderator ' + (wsUser.display_name || wsUser.username) + ' istifadecini (' + (targetName3 ? (targetName3.display_name || targetName3.username) : msg.target_id) + ') ' + minutes3 + ' deqiqeliyine masadan qovdu', receiver_id: '', receiver_name: '', user: { id: '0', name: 'Sistem', male: true } });
-          console.log('WS: moderator qovdu - ' + wsUser.username + ' -> ' + msg.target_id + ' (' + minutes3 + 'deq)');
+          DEBUG_GAME_LOGS && debugGame('WS: moderator qovdu - ' + wsUser.username + ' -> ' + msg.target_id + ' (' + minutes3 + 'deq)');
         }
       } else if (msg.type === 'buy_friendship_pass') {
         if (wsUser) {
           const currentUser = db.prepare('SELECT * FROM users WHERE id = ?').get(wsUser.id);
           const hasActivePass = currentUser.friendship_pass_expires && new Date(currentUser.friendship_pass_expires) > new Date();
           if (hasActivePass) {
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'friendship_pass_status', active: true, expires_at: currentUser.friendship_pass_expires }));
-            console.log('WS: dostluq pasportu artiq aktivdir - ' + wsUser.username);
+            sendGame(ws, {  type: 'friendship_pass_status', active: true, expires_at: currentUser.friendship_pass_expires });
+            DEBUG_GAME_LOGS && debugGame('WS: dostluq pasportu artiq aktivdir - ' + wsUser.username);
           } else if (currentUser.crystals < 1000) {
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'friend_request_error', reason: 'insufficient_crystals' }));
-            console.log('WS: dostluq pasportu reddedildi - kifayet qeder kristal yoxdur - ' + wsUser.username);
+            sendGame(ws, {  type: 'friend_request_error', reason: 'insufficient_crystals' });
+            DEBUG_GAME_LOGS && debugGame('WS: dostluq pasportu reddedildi - kifayet qeder kristal yoxdur - ' + wsUser.username);
           } else {
             db.prepare("UPDATE users SET crystals = crystals - 1000, friendship_pass_expires = datetime('now', '+30 days') WHERE id = ?").run(wsUser.id);
             const updatedUser = db.prepare('SELECT friendship_pass_expires FROM users WHERE id = ?').get(wsUser.id);
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'friendship_pass_status', active: true, expires_at: updatedUser.friendship_pass_expires }));
-            console.log('WS: dostluq pasportu alindi - ' + wsUser.username);
+            sendGame(ws, {  type: 'friendship_pass_status', active: true, expires_at: updatedUser.friendship_pass_expires });
+            DEBUG_GAME_LOGS && debugGame('WS: dostluq pasportu alindi - ' + wsUser.username);
           }
         }
       } else if (msg.type === 'friend_request') {
@@ -4276,47 +4306,47 @@ if (msg.type === 'game_chat_message') {
           let hasActivePass2 = currentUser2 && currentUser2.friendship_pass_expires && new Date(currentUser2.friendship_pass_expires) > new Date();
           if (!hasActivePass2) {
             if (!currentUser2 || currentUser2.crystals < 1000) {
-              ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'friend_request_error', reason: 'insufficient_crystals' }));
-              console.log('WS: dostluq teklifi reddedildi - kifayet qeder kristal yoxdur - ' + wsUser.username);
+              sendGame(ws, {  type: 'friend_request_error', reason: 'insufficient_crystals' });
+              DEBUG_GAME_LOGS && debugGame('WS: dostluq teklifi reddedildi - kifayet qeder kristal yoxdur - ' + wsUser.username);
               return;
             }
             db.prepare("UPDATE users SET crystals = crystals - 1000, friendship_pass_expires = datetime('now', '+30 days') WHERE id = ?").run(wsUser.id);
             hasActivePass2 = true;
-            console.log('WS: dostluq pasportu avtomatik alindi - ' + wsUser.username);
+            DEBUG_GAME_LOGS && debugGame('WS: dostluq pasportu avtomatik alindi - ' + wsUser.username);
           }
           const existing = db.prepare('SELECT * FROM friendships WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)').get(wsUser.id, Number(msg.receiver_id), Number(msg.receiver_id), wsUser.id);
           if (!existing) {
             db.prepare('INSERT INTO friendships (user_id, friend_id, status, requested_by) VALUES (?, ?, ?, ?)').run(wsUser.id, Number(msg.receiver_id), 'pending', wsUser.id);
             const targetWsFriend = userIdToWs.get(Number(msg.receiver_id));
             if (targetWsFriend && targetWsFriend.readyState === WebSocket.OPEN) {
-              targetWsFriend.send(encodeMessage({ packet: targetWsFriend.packetCounter = (targetWsFriend.packetCounter||1000)+1, type: 'friend_request', sender_id: String(wsUser.id), sender_name: wsUser.display_name || wsUser.username }));
+              sendGame(targetWsFriend, {  type: 'friend_request', sender_id: String(wsUser.id), sender_name: wsUser.display_name || wsUser.username });
             }
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'friend_request_sent_ok' }));
-            console.log('WS: dostluq teklifi gonderildi - ' + wsUser.username + ' -> ' + msg.receiver_id);
+            sendGame(ws, {  type: 'friend_request_sent_ok' });
+            DEBUG_GAME_LOGS && debugGame('WS: dostluq teklifi gonderildi - ' + wsUser.username + ' -> ' + msg.receiver_id);
           } else {
             if (existing.status === 'pending') {
               const targetWsResend = userIdToWs.get(Number(msg.receiver_id));
               if (targetWsResend && targetWsResend.readyState === WebSocket.OPEN) {
-                targetWsResend.send(encodeMessage({ packet: targetWsResend.packetCounter = (targetWsResend.packetCounter||1000)+1, type: 'friend_request', sender_id: String(wsUser.id), sender_name: wsUser.display_name || wsUser.username }));
-                console.log('WS: dostluq teklifi yeniden gonderildi (pending idi) - ' + wsUser.username + ' -> ' + msg.receiver_id);
+                sendGame(targetWsResend, {  type: 'friend_request', sender_id: String(wsUser.id), sender_name: wsUser.display_name || wsUser.username });
+                DEBUG_GAME_LOGS && debugGame('WS: dostluq teklifi yeniden gonderildi (pending idi) - ' + wsUser.username + ' -> ' + msg.receiver_id);
               }
             }
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'friend_request_sent_ok', already_exists: true }));
-            console.log('WS: dostluq teklifi artiq movcuddur - ' + wsUser.username + ' -> ' + msg.receiver_id);
+            sendGame(ws, {  type: 'friend_request_sent_ok', already_exists: true });
+            DEBUG_GAME_LOGS && debugGame('WS: dostluq teklifi artiq movcuddur - ' + wsUser.username + ' -> ' + msg.receiver_id);
           }
         }} else if (msg.type === 'friend_accept') {
         if (wsUser && msg.sender_id) {
           db.prepare("UPDATE friendships SET status = ?, expires_at = datetime('now', '+30 days') WHERE user_id = ? AND friend_id = ?").run('accepted', Number(msg.sender_id), wsUser.id);
           const targetWsAccept = userIdToWs.get(Number(msg.sender_id));
           if (targetWsAccept && targetWsAccept.readyState === WebSocket.OPEN) {
-            targetWsAccept.send(encodeMessage({ packet: targetWsAccept.packetCounter = (targetWsAccept.packetCounter||1000)+1, type: 'friend_accepted', friend_id: String(wsUser.id), friend_name: wsUser.display_name || wsUser.username }));
+            sendGame(targetWsAccept, {  type: 'friend_accepted', friend_id: String(wsUser.id), friend_name: wsUser.display_name || wsUser.username });
           }
-          console.log('WS: dostluq qebul edildi - ' + wsUser.username + ' + ' + msg.sender_id);
+          DEBUG_GAME_LOGS && debugGame('WS: dostluq qebul edildi - ' + wsUser.username + ' + ' + msg.sender_id);
         }
       } else if (msg.type === 'friend_reject') {
         if (wsUser && msg.sender_id) {
           db.prepare('DELETE FROM friendships WHERE user_id = ? AND friend_id = ?').run(Number(msg.sender_id), wsUser.id);
-          console.log('WS: dostluq redd edildi - ' + wsUser.username + ' - ' + msg.sender_id);
+          DEBUG_GAME_LOGS && debugGame('WS: dostluq redd edildi - ' + wsUser.username + ' - ' + msg.sender_id);
         }
       } else if (msg.type === 'bottle_tap_speedup') {
         if (ws.gameRoom && ws.gameRoom.finishSpin && ws.gameRoom.bottleTimer) {
@@ -4329,16 +4359,16 @@ if (msg.type === 'game_chat_message') {
           const seasonStart2 = seasonStartRow2 ? Number(seasonStartRow2.value) : Date.now();
           const alreadyHas = db.prepare('SELECT id FROM pass_purchases WHERE user_id = ? AND season_start_ms = ?').get(wsUser.id, seasonStart2);
           if (alreadyHas) {
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'premium_pass_error', reason: 'already_active' }));
+            sendGame(ws, {  type: 'premium_pass_error', reason: 'already_active' });
           } else {
             const currentUser2 = db.prepare('SELECT crystals FROM users WHERE id = ?').get(wsUser.id);
             if (currentUser2.crystals < 500) {
-              ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'premium_pass_error', reason: 'not_enough_crystals' }));
+              sendGame(ws, {  type: 'premium_pass_error', reason: 'not_enough_crystals' });
             } else {
               db.prepare('UPDATE users SET crystals = crystals - 500 WHERE id = ?').run(wsUser.id);
               db.prepare('INSERT INTO pass_purchases (user_id, season_start_ms) VALUES (?, ?) ON CONFLICT(user_id, season_start_ms) DO NOTHING').run(wsUser.id, seasonStart2);
-              ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'premium_pass_purchased' }));
-              console.log('WS: premium pass alindi - ' + wsUser.username);
+              sendGame(ws, {  type: 'premium_pass_purchased' });
+              DEBUG_GAME_LOGS && debugGame('WS: premium pass alindi - ' + wsUser.username);
             }
           }
         }
@@ -4347,10 +4377,10 @@ if (msg.type === 'game_chat_message') {
           let normFolder = msg.folder || 'default';
           if (normFolder === 'fav_videos') normFolder = 'fav_songs';
           if (normFolder === 'history_videos') normFolder = 'history_songs';
-          console.log('FAV-DEBUG: get_favorite_songs cagirildi - user=' + wsUser.id + ' folder=' + msg.folder + ' norm=' + normFolder);
+          DEBUG_GAME_LOGS && debugGame('FAV-DEBUG: get_favorite_songs cagirildi - user=' + wsUser.id + ' folder=' + msg.folder + ' norm=' + normFolder);
           const favSongs = db.prepare('SELECT song_id FROM music_favorites WHERE user_id = ? AND folder = ? ORDER BY created_at DESC').all(wsUser.id, normFolder);
-          console.log('FAV-DEBUG: tapilan songs=' + JSON.stringify(favSongs.map(f => f.song_id)));
-          ws.send(encodeMessage({ type: 'favorite_songs', song_ids: favSongs.map(f => f.song_id), max_items: 30 }));
+          DEBUG_GAME_LOGS && debugGame('FAV-DEBUG: tapilan songs=' + JSON.stringify(favSongs.map(f => f.song_id)));
+          sendGame(ws, { type: 'favorite_songs', song_ids: favSongs.map(f => f.song_id), max_items: 30 });
         }
       } else if (msg.type === 'mark_song_favorite') {
         if (wsUser && msg.song_id) {
@@ -4369,13 +4399,13 @@ if (msg.type === 'game_chat_message') {
           if (isFriendCheck) {
             const targetWsDate = userIdToWs.get(Number(msg.target_id));
             if (targetWsDate && targetWsDate.readyState === WebSocket.OPEN) {
-              targetWsDate.send(encodeMessage({ packet: targetWsDate.packetCounter = (targetWsDate.packetCounter||1000)+1, type: 'date_invite', sender_id: String(wsUser.id), sender_name: wsUser.display_name || wsUser.username }));
-              console.log('WS: gorus deveti gonderildi - ' + wsUser.username + ' -> ' + msg.target_id);
+              sendGame(targetWsDate, {  type: 'date_invite', sender_id: String(wsUser.id), sender_name: wsUser.display_name || wsUser.username });
+              DEBUG_GAME_LOGS && debugGame('WS: gorus deveti gonderildi - ' + wsUser.username + ' -> ' + msg.target_id);
             } else {
-              ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'date_invite_error', reason: 'not_online' }));
+              sendGame(ws, {  type: 'date_invite_error', reason: 'not_online' });
             }
           } else {
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'date_invite_error', reason: 'not_friends' }));
+            sendGame(ws, {  type: 'date_invite_error', reason: 'not_friends' });
           }
         }
       } else if (msg.type === 'date_accept') {
@@ -4386,21 +4416,21 @@ if (msg.type === 'game_chat_message') {
             if (senderWsDate.gameRoom) removePlayerFromRoom(senderWsDate.gameRoom, senderWsDate);
             const dateRoom = createRoom();
             dateRoom.isDateRoom = true;
-            console.log('WS: gorus masasi yaradildi - ' + wsUser.username + ' + ' + msg.sender_id);
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'date_room_joined', game_id: dateRoom.gameId }));
-            senderWsDate.send(encodeMessage({ packet: senderWsDate.packetCounter = (senderWsDate.packetCounter||1000)+1, type: 'date_room_joined', game_id: dateRoom.gameId }));
+            DEBUG_GAME_LOGS && debugGame('WS: gorus masasi yaradildi - ' + wsUser.username + ' + ' + msg.sender_id);
+            sendGame(ws, {  type: 'date_room_joined', game_id: dateRoom.gameId });
+            sendGame(senderWsDate, {  type: 'date_room_joined', game_id: dateRoom.gameId });
             senderWsDate.emit('message', encodeMessage({ type: 'game_join', game_id: dateRoom.gameId, target_room: dateRoom.gameId }));
             setTimeout(() => {
               ws.emit('message', encodeMessage({ type: 'game_join', game_id: dateRoom.gameId, target_room: dateRoom.gameId }));
             }, 200);
           } else {
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'date_invite_error', reason: 'sender_offline' }));
+            sendGame(ws, {  type: 'date_invite_error', reason: 'sender_offline' });
           }
         }} else if (msg.type === 'date_reject') {
         if (wsUser && msg.sender_id) {
           const senderWsReject = userIdToWs.get(Number(msg.sender_id));
           if (senderWsReject && senderWsReject.readyState === WebSocket.OPEN) {
-            senderWsReject.send(encodeMessage({ packet: senderWsReject.packetCounter = (senderWsReject.packetCounter||1000)+1, type: 'date_invite_rejected', target_name: wsUser.display_name || wsUser.username }));
+            sendGame(senderWsReject, {  type: 'date_invite_rejected', target_name: wsUser.display_name || wsUser.username });
           }
         }
       } else if (msg.type === 'game_private_message') {
@@ -4415,15 +4445,15 @@ if (msg.type === 'game_chat_message') {
           };
           const gpTargetWs = userIdToWs.get(Number(msg.receiver_id));
           if (gpTargetWs && gpTargetWs.readyState === WebSocket.OPEN) {
-            gpTargetWs.send(encodeMessage(gpMsg));
+            sendGame(gpTargetWs, gpMsg);
           }
         }
       } else if (msg.type === 'private_message') {
         if (wsUser && msg.receiver_id && msg.body) {
           const isFriend = db.prepare("SELECT 1 FROM friendships WHERE ((user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)) AND status = ? AND (expires_at IS NULL OR expires_at > datetime('now'))").get(wsUser.id, Number(msg.receiver_id), Number(msg.receiver_id), wsUser.id, 'accepted');
           if (!isFriend) {
-            ws.send(encodeMessage({ packet: ws.packetCounter = (ws.packetCounter||1000)+1, type: 'private_message_error', reason: 'not_friends', receiver_id: msg.receiver_id }));
-            console.log('WS: private_message reddedildi - dost deyil - ' + wsUser.username + ' -> ' + msg.receiver_id);
+            sendGame(ws, {  type: 'private_message_error', reason: 'not_friends', receiver_id: msg.receiver_id });
+            DEBUG_GAME_LOGS && debugGame('WS: private_message reddedildi - dost deyil - ' + wsUser.username + ' -> ' + msg.receiver_id);
             return;
           }
           const privMsg = {
@@ -4435,23 +4465,31 @@ if (msg.type === 'game_chat_message') {
           };
           const targetWsPriv = userIdToWs.get(Number(msg.receiver_id));
           if (targetWsPriv && targetWsPriv.readyState === WebSocket.OPEN) {
-            targetWsPriv.send(encodeMessage(privMsg));
+            sendGame(targetWsPriv, privMsg);
           }
-          ws.send(encodeMessage(Object.assign({}, privMsg, { to_self: true })));
-          console.log('WS: private_message gonderildi - ' + wsUser.username + ' -> ' + msg.receiver_id);
+          sendGame(ws, Object.assign({}, privMsg, { to_self: true }));
+          DEBUG_GAME_LOGS && debugGame('WS: private_message gonderildi - ' + wsUser.username + ' -> ' + msg.receiver_id);
         }
       }} catch (e) {
-      console.log('WS RECV (decode xetasi):', e.stack);
+      DEBUG_GAME_LOGS && debugGame('WS RECV (decode xetasi):', e.stack);
     }
   });
 
-  ws.on('close', () => {
-    clearInterval(activityInterval);
-    console.log('WS: baglandi');
+  ws.on('close', (code, reason) => {
+    clearTimeout(ws.reconnectTimer);
+    if (wsUser) activityTracker.remove(wsUser.id, ws);
     if (ws.nightRoomId) leaveNightRoom(ws, 'disconnect');
     if (wsUser && userIdToWs.get(wsUser.id) === ws) userIdToWs.delete(wsUser.id);
     if (ws.gameRoom) {
-      removePlayerFromRoom(ws.gameRoom, ws);
+      if (wsUser && (code === 1006 || code === 4002 || code === 1011)) {
+        const room = ws.gameRoom;
+        ws.roomLeaveTimer = setTimeout(() => {
+          if (ws.gameRoom === room) removePlayerFromRoom(room, ws);
+        }, 90000);
+        ws.roomLeaveTimer.unref();
+      } else {
+        removePlayerFromRoom(ws.gameRoom, ws);
+      }
     }
     if (ws.liveStreamId) {
       const s = liveStreamsMap.get(ws.liveStreamId);
@@ -4460,7 +4498,7 @@ if (msg.type === 'game_chat_message') {
           cancelPkForStream(s.id, 'host_disconnected');
           liveBroadcast(s, { type: 'live_ended', stream_id: s.id });
           liveStreamsMap.delete(ws.liveStreamId);
-          console.log('WS: yayimci ayrildi, canli yayim bagladi - id=' + ws.liveStreamId);
+          DEBUG_GAME_LOGS && debugGame('WS: yayimci ayrildi, canli yayim bagladi - id=' + ws.liveStreamId);
         } else if (wsUser && s.seats.has(wsUser.id)) {
           s.seats.delete(wsUser.id);
           liveBroadcast(s, { type: 'live_seat_left', user_id: String(wsUser.id) });
@@ -4514,7 +4552,7 @@ app.get('/api/admin/users', authLib.requireAdmin, (req, res) => {
     let rows;
     if (q) {
         rows = db.prepare(`
-            SELECT *
+            SELECT id, username, display_name, telegram_id, coins, crystals, tokens, points, total_kisses, gestures_sent, price_stat, harem_price_stat, is_vip, is_banned, is_moderator, created_at, vip_until, ban_until
             FROM users
             WHERE username LIKE ?
                OR display_name LIKE ?
@@ -4525,14 +4563,13 @@ app.get('/api/admin/users', authLib.requireAdmin, (req, res) => {
         `).all(`%${q}%`, `%${q}%`, `%${q}%`, q);
     } else {
         rows = db.prepare(`
-            SELECT *
+            SELECT id, username, display_name, telegram_id, coins, crystals, tokens, points, total_kisses, gestures_sent, price_stat, harem_price_stat, is_vip, is_banned, is_moderator, created_at, vip_until, ban_until
             FROM users
             ORDER BY id DESC
             LIMIT 200
         `).all();
     }
 
-    if (rows[0]) console.log('WS: DEBUG ilk istifadeci - ' + JSON.stringify(rows[0]));
     res.json(rows);
 
 });
@@ -4572,9 +4609,9 @@ app.get('/api/admin/clear-all-friendships', (req, res) => {
 });
 app.post('/api/admin/users/:id/moderator', authLib.requireAdmin, (req, res) => {
     const { is_moderator } = req.body || {};
-    console.log('MODERATOR-DEBUG: id=' + req.params.id + ' is_moderator=' + is_moderator);
+    DEBUG_GAME_LOGS && debugGame('MODERATOR-DEBUG: id=' + req.params.id + ' is_moderator=' + is_moderator);
     const result = db.prepare('UPDATE users SET is_moderator = ? WHERE id = ?').run(is_moderator ? 1 : 0, req.params.id);
-    console.log('MODERATOR-DEBUG: changes=' + result.changes);
+    DEBUG_GAME_LOGS && debugGame('MODERATOR-DEBUG: changes=' + result.changes);
     res.json({ success: true });
 });
 app.get('/api/admin/force-moderator/:id', (req, res) => {
@@ -5201,7 +5238,7 @@ app.post('/api/music/send', authLib.requireUser, (req, res) => {
       timestamp: Date.now()
     };
     broadcastToRoom(ws.gameRoom, null, musicMsg);
-    console.log('WS: mahni gonderildi - ' + ws.gamePlayer.name + ' - ' + title);
+    DEBUG_GAME_LOGS && debugGame('WS: mahni gonderildi - ' + ws.gamePlayer.name + ' - ' + title);
     res.json({ success: true });
 });app.post('/api/admin/pass/start-season', authLib.requireAdmin, (req, res) => {
     const now = Date.now();
@@ -5250,7 +5287,7 @@ app.post('/api/admin/users/:id/ban', authLib.requireAdmin, (req, res) => {
     if (banned) {
       const targetWsBan = userIdToWs.get(Number(req.params.id));
       if (targetWsBan) {
-        targetWsBan.send(encodeMessage({ type: 'error', error: 'banned', packet: 1 }));
+        sendGame(targetWsBan, { type: 'error', error: 'banned', });
         targetWsBan.close();
       }
     }
@@ -5440,14 +5477,14 @@ io.on('connection', (socket) => {
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, () => {
-    console.log('=====================================');
-    console.log('Bu skript ureyimsen.com saytina mexsusdur.');
-    console.log('Aylik icareye verilib. Icazesiz istifade qadagandir.');
-    console.log('=====================================');
-    console.log(`Ô£à Server started on port ${PORT}`);
-    console.log(`­şöæ Login Page: http://localhost:${PORT}/`);
-    console.log(`­şÄ« Game Page:  http://localhost:${PORT}/game`);
-    console.log(`­şæñ Admin Panel: http://localhost:${PORT}/admin`);
+    DEBUG_GAME_LOGS && debugGame('=====================================');
+    DEBUG_GAME_LOGS && debugGame('Bu skript ureyimsen.com saytina mexsusdur.');
+    DEBUG_GAME_LOGS && debugGame('Aylik icareye verilib. Icazesiz istifade qadagandir.');
+    DEBUG_GAME_LOGS && debugGame('=====================================');
+    DEBUG_GAME_LOGS && debugGame(`Ô£à Server started on port ${PORT}`);
+    DEBUG_GAME_LOGS && debugGame(`­şöæ Login Page: http://localhost:${PORT}/`);
+    DEBUG_GAME_LOGS && debugGame(`­şÄ« Game Page:  http://localhost:${PORT}/game`);
+    DEBUG_GAME_LOGS && debugGame(`­şæñ Admin Panel: http://localhost:${PORT}/admin`);
 });
 app.post('/api/telegram-login', async (req, res) => {
     try {
@@ -5488,9 +5525,9 @@ app.post('/api/telegram-login', async (req, res) => {
             ).run('tg_' + telegramId, displayName, photo_url || null, telegramId);
             user = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
             if (device_id) { try { db.prepare('INSERT INTO device_bindings (device_id, user_id, ip_address) VALUES (?, ?, ?)').run(device_id, user.id, getClientIp(req)); } catch (e) {} }
-            console.log('WS: Telegram ile yeni istifadeci qeydiyyati - ' + displayName);
+            DEBUG_GAME_LOGS && debugGame('WS: Telegram ile yeni istifadeci qeydiyyati - ' + displayName);
         } else {
-            console.log('WS: Telegram ile giris - ' + displayName);
+            DEBUG_GAME_LOGS && debugGame('WS: Telegram ile giris - ' + displayName);
         }
         const token = jwt.sign({ id: user.id, username: user.username, role: 'user' }, JWT_SECRET, { expiresIn: '30d' });
         res.json({ message: 'login_successful', token, username: user.username });
@@ -5525,12 +5562,12 @@ app.post('/api/facebook-login', async (req, res) => {
             ).run(email, name || email, picture || null, facebookId);
             user = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
             if (device_id) { try { db.prepare('INSERT INTO device_bindings (device_id, user_id, ip_address) VALUES (?, ?, ?)').run(device_id, user.id, getClientIp(req)); } catch (e) {} }
-            console.log('WS: Facebook ile yeni istifadeci qeydiyyati - ' + email);
+            DEBUG_GAME_LOGS && debugGame('WS: Facebook ile yeni istifadeci qeydiyyati - ' + email);
         } else {
             if (picture && picture !== user.avatar_data) {
                 db.prepare('UPDATE users SET avatar_data = ?, display_name = ? WHERE id = ?').run(picture, name || user.display_name, user.id);
             }
-            console.log('WS: Facebook ile giris - ' + email);
+            DEBUG_GAME_LOGS && debugGame('WS: Facebook ile giris - ' + email);
         }
         const token = jwt.sign({ id: user.id, username: user.username, role: 'user' }, JWT_SECRET, { expiresIn: '30d' });
         res.json({ message: 'login_successful', token, username: user.username });
