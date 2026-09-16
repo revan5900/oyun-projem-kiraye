@@ -82995,7 +82995,7 @@ class MusicListDialog extends Dialog {
       const hasSongs = p.songs.length > 0;
       const hasAnySongs = hasUserPlaylistSongs || hasSongs;
       const showProviderHeader = hasSongs && isUserPlaylistMode && !!search;
-      const showMainSongs = hasSongs && (!isUserPlaylistMode || !!search);
+      const showMainSongs = hasSongs;
       const showList = !showLoader && hasAnySongs;
       const showEmptyBlock = !showLoader && !hasAnySongs;
       const onTab = newTab => {
@@ -83033,7 +83033,10 @@ class MusicListDialog extends Dialog {
       })), preact_module_(Dialog.Content, {
         class: MusicListDialog_cls('x_popup__content'),
         innerRef: scrollTargetRef
-      }, showLoader && preact_module_("div", {
+      }, !search.trim() && preact_module_("div", {
+        class: MusicListDialog_cls('user-playlist-group-title'),
+        role: 'heading', 'aria-level': 2
+      }, p.type === 'video' ? 'Populyar Azərbaycan klipləri' : 'Populyar Azərbaycan mahnıları'), showLoader && preact_module_("div", {
         class: MusicListDialog_cls('loading')
       }, preact_module_("div", {
         class: MusicListDialog_cls('loading-icon')
@@ -83063,8 +83066,8 @@ class MusicListDialog extends Dialog {
         onPurchase: item => p.cb.onpurchase(item),
         markFavourite: item => p.tabs.markFavourite(item.id, !item.favourite)
       }) : preact_module_(preact_module_k, null)), showEmptyBlock && preact_module_("div", {
-        class: MusicListDialog_cls('empty')
-      }, !!userPlaylistSongs && !search ? p.emptyPlaylistTitle : p.emptyTitle)), preact_module_(Dialog.Footer, {
+        class: MusicListDialog_cls('empty'), role: 'status'
+      }, p.error ? 'Mahnıları yükləmək mümkün olmadı. Bir az sonra yenidən yoxlayın.' : (!!userPlaylistSongs && !search ? p.emptyPlaylistTitle : p.emptyTitle))), preact_module_(Dialog.Footer, {
         showScrollBorder: true
       }));
     };
@@ -83072,7 +83075,7 @@ class MusicListDialog extends Dialog {
     this.el = document.createElement('div');
     this.el.classList.add('popup', MusicListDialog_cls('x_popup'));
     setTimeout(() => {
-      this.updateTab(this.p.defaultTab, '');
+      if (!this.popularClosed) this.p.cb.onsearch('');
     });
   }
   update() {
@@ -83174,10 +83177,9 @@ const SongVideo = p => preact_module_("div", {
   onClick: () => p.onPurchase(p.song.music)
 }, preact_module_("div", {
   class: MusicListDialog_cls('video-thumbnail-container')
-}, preact_module_("div", {
-  style: {
-    backgroundImage: `url('${p.song.icon}')`
-  },
+}, preact_module_("img", {
+  src: p.song.icon, alt: '', loading: 'lazy', decoding: 'async',
+  style: { objectFit: 'cover' },
   class: MusicListDialog_cls('video-thumbnail')
 }), p.showProviderIcon && preact_module_("div", {
   class: MusicListDialog_cls('video-icon', [p.song.provider])
@@ -103936,14 +103938,6 @@ VKSocial.GIFT_LEVELS = [20, 40, 80, 150, 250, 350, 550, 750, 950, 1150, 1450, 17
 
 
 
-let lastRequestId = 0;
-const wrapUpdateListRequest = func => function () {
-  lastRequestId += 1;
-  for (var _len = arguments.length, args = new Array(_len), _key = 0; _key < _len; _key++) {
-    args[_key] = arguments[_key];
-  }
-  func(lastRequestId, ...args);
-};
 const DEFAULT_FAV_VIDEOS_FOLDER = 'fav_videos';
 const DEFAULT_HISTORY_VIDEOS_FOLDER = 'history_videos';
 class MusicPresenter {
@@ -103986,6 +103980,11 @@ class MusicPresenter {
   }
   showAudios(musicService, confirmPurchase, userPlaylistService, receiver) {
     return __awaiter(this, void 0, void 0, function* () {
+      let closed = false, lastRequestId = 0;
+      const progressCallbacks = new Set();
+      const wrapUpdateListRequest = func => (...args) => {
+        if (!closed) func(++lastRequestId, ...args);
+      };
       const {
         trans,
         session,
@@ -104004,19 +104003,23 @@ class MusicPresenter {
       }
       const performSearch = (requestId, query, newResultSource) => __awaiter(this, void 0, void 0, function* () {
         const progressCallback = () => {
-          loading(true, musicService.defaultSongsLoadingProgress);
+          if (!closed && requestId === lastRequestId) loading(true, musicService.defaultSongsLoadingProgress);
         };
+        if (closed || requestId !== lastRequestId) return;
+        progressCallbacks.add(progressCallback);
         root.onEnterFrame.add(progressCallback);
         yield updateSongs(requestId, newResultSource, () => __awaiter(this, void 0, void 0, function* () {
-          const [songs, userPlaylistSongs] = yield Promise.all([query || !userPlaylistService ? musicService.search(query) : [], userPlaylistService ? userPlaylistService.search(query) : undefined]);
+          const [songs, userPlaylistSongs] = yield Promise.all([musicService.search(query.trim()), query.trim() && userPlaylistService ? userPlaylistService.search(query) : undefined]);
           return {
             songs,
             userPlaylistSongs
           };
         }));
         root.onEnterFrame.remove(progressCallback);
+        progressCallbacks.delete(progressCallback);
       });
       const search = wrapUpdateListRequest((requestId, query) => __awaiter(this, void 0, void 0, function* () {
+        loading(true);
         if (query.trim() === '') {
           yield performSearch(requestId, query, 'default');
           return;
@@ -104091,11 +104094,7 @@ class MusicPresenter {
           dlg.update();
         }
       } : undefined;
-      if (this.savedMusicListProps) {
-        this.savedMusicListProps.cb = cb;
-        this.savedMusicListProps.tabs = tabs;
-      }
-      const musicListProps = this.savedMusicListProps || {
+      const musicListProps = {
         type: 'audio',
         title: {
           default: trans.translate('dlg:music:title'),
@@ -104121,7 +104120,10 @@ class MusicPresenter {
       };
       const dlg = factory.createMusicListDialog(musicListProps);
       dlg.onclose = () => {
-        this.savedMusicListProps = musicListProps;
+        closed = true; ++lastRequestId; dlg.popularClosed = true;
+        for (const callback of progressCallbacks) root.onEnterFrame.remove(callback);
+        progressCallbacks.clear();
+        musicListProps.loader = { show: false };
       };
       let resultSource = 'default';
       const toView = music => ({
@@ -104135,21 +104137,23 @@ class MusicPresenter {
         music
       });
       const updateSongs = (requestId, newResultSource, func) => __awaiter(this, void 0, void 0, function* () {
-        if (requestId !== lastRequestId) return;
+        if (closed || requestId !== lastRequestId) return;
         try {
           loading(true);
           const {
             songs,
             userPlaylistSongs
           } = yield func();
-          if (requestId !== lastRequestId) return;
-          musicListProps.songs = songs.map(toView);
+          if (closed || requestId !== lastRequestId) return;
+          musicListProps.error = false;
+          musicListProps.songs = songs.slice(0, 12).map(toView);
           musicListProps.userPlaylistSongs = userPlaylistSongs === null || userPlaylistSongs === void 0 ? void 0 : userPlaylistSongs.map(toView);
           dlg.setParams(musicListProps);
           resultSource = newResultSource;
           loading(false);
         } catch (e) {
-          exception(e, 'info');
+          if (closed || requestId !== lastRequestId) return;
+          musicListProps.songs = []; musicListProps.userPlaylistSongs = undefined; musicListProps.error = true;
           loading(false);
         }
       });
@@ -104174,6 +104178,10 @@ class MusicPresenter {
   }
   showVideos(videoService, confirmPurchase, receiver) {
     return __awaiter(this, void 0, void 0, function* () {
+      let closed = false, lastRequestId = 0;
+      const wrapUpdateListRequest = func => (...args) => {
+        if (!closed) func(++lastRequestId, ...args);
+      };
       const {
         trans,
         session,
@@ -104195,6 +104203,7 @@ class MusicPresenter {
       let resultSource = 'default';
       const [favVideos, historyVideos] = yield Promise.all([this.buildVideoFolder(videoService, 'favourites'), this.buildVideoFolder(videoService, 'history')]);
       const search = wrapUpdateListRequest((requestId, query) => __awaiter(this, void 0, void 0, function* () {
+        loading(true);
         if (query.trim() === '') {
           updateVideos(requestId, 'default', () => videoService.search(query));
           return;
@@ -104255,11 +104264,7 @@ class MusicPresenter {
           dlg.update();
         }
       } : undefined;
-      if (this.savedVideoListProps) {
-        this.savedVideoListProps.cb = cb;
-        this.savedVideoListProps.tabs = tabs;
-      }
-      const videosListProps = this.savedVideoListProps || {
+      const videosListProps = {
         type: 'video',
         title: {
           default: trans.translate('dlg:music:title'),
@@ -104286,13 +104291,14 @@ class MusicPresenter {
       };
       const dlg = factory.createMusicListDialog(videosListProps);
       const updateVideos = (requestId, newResultSource, func) => __awaiter(this, void 0, void 0, function* () {
-        if (requestId !== lastRequestId) return;
+        if (closed || requestId !== lastRequestId) return;
         try {
           loading(true);
           const response = yield func();
-          if (requestId !== lastRequestId) return;
+          if (closed || requestId !== lastRequestId) return;
           resultSource = newResultSource;
-          videosListProps.songs = response.map(music => {
+          videosListProps.error = false;
+          videosListProps.songs = response.slice(0, 12).map(music => {
             return {
               id: music.song_id,
               artist: music.artist,
@@ -104307,7 +104313,8 @@ class MusicPresenter {
           dlg.setParams(videosListProps);
           loading(false);
         } catch (e) {
-          exception(e);
+          if (closed || requestId !== lastRequestId) return;
+          videosListProps.songs = []; videosListProps.error = true;
           loading(false);
         }
       });
@@ -104319,7 +104326,8 @@ class MusicPresenter {
         dlg.setParams(videosListProps);
       };
       dlg.onclose = () => {
-        this.savedVideoListProps = videosListProps;
+        closed = true; ++lastRequestId; dlg.popularClosed = true;
+        videosListProps.loader = { show: false };
       };
       dlg.open();
       return dlg;
@@ -107700,6 +107708,23 @@ function preloadImages(imageLoader, items, mediaUrls) {
 
 
 
+const popularMusicCache = new Map();
+function loadPopularMusic(provider) {
+  const hit = popularMusicCache.get(provider);
+  if (hit && hit.expires > Date.now()) return hit.promise;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  const entry = { expires: Date.now() + 30 * 60 * 1000 };
+  entry.promise = fetch('/api/music/popular?provider=' + encodeURIComponent(provider), { signal: controller.signal })
+    .then(async response => {
+      const data = await response.json();
+      if (!response.ok || data.error || data.provider !== provider || !Array.isArray(data.items)) throw new Error('popular_unavailable');
+      return data.items.slice(0, 12);
+    }).catch(error => { entry.expires = Date.now() + 60000; throw error; })
+    .finally(() => clearTimeout(timer));
+  popularMusicCache.set(provider, entry);
+  return entry.promise;
+}
 class CilizMusicService {
   constructor(host, receiver, platform) {
     this.host = host;
@@ -107718,14 +107743,7 @@ class CilizMusicService {
     });
   }
   getDefaultAudios() {
-    return __awaiter(this, void 0, void 0, function* () {
-      const params = queryStringBuilder({
-        count: this.musicCount
-      });
-      const url = `${this.host}/get_by_ids_and_popular?${params}`;
-      const response = yield loadJSON(url);
-      return this.parseResponse(response);
-    });
+    return loadPopularMusic('cz').then(items => this.parseResponse(items));
   }
   search(query) {
     return __awaiter(this, void 0, void 0, function* () {
@@ -107999,7 +108017,7 @@ class YTVideoService {
   search(query) {
     return __awaiter(this, void 0, void 0, function* () {
       const q = query ? query.replace(/[-.,]/ig, '') : '';
-      if (!q || q.match(/^[ ]*$/)) return [];
+      if (!q || q.match(/^[ ]*$/)) return this.getPopular();
       const items = yield request('search', {
         q,
         count: this.videoCount,
@@ -108018,14 +108036,7 @@ class YTVideoService {
     });
   }
   getPopular() {
-    return __awaiter(this, void 0, void 0, function* () {
-      const items = yield request('popular', {
-        count: this.videoCount,
-        platform: YTVideoService_social2platform(this.p.socialId),
-        user_country: this.p.user_country
-      });
-      return items.map(YTVideoService_item2music);
-    });
+    return loadPopularMusic('yt').then(items => items.map(YTVideoService_item2music));
   }
   showMusicRevert(reason, presenter) {
     presenter.showBase();

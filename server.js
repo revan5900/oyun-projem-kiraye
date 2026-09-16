@@ -49,6 +49,8 @@ function getInnertube() {
 
 const app = express();
 app.use(compression());
+const { createPopular, providerResolver } = require('./music-popular');
+app.get('/api/music/popular', createPopular({ resolve: providerResolver({ getInnertube }) }).handler);
 
 app.get('/api/test123', (req, res) => { res.send('TEST ISLEYIR'); });
 app.use(cors({ origin: ALLOWED_ORIGINS, credentials: true }));
@@ -1008,14 +1010,12 @@ app.use(express.static(GAME_DIR));
 
 // YouTube axtarish/musiqi proxy
 app.get('/api/ciliz-music/search', async (req, res) => {
-    DEBUG_GAME_LOGS && debugGame('CILIZ-MUSIC-SEARCH-CAGIRILDI: ' + req.query.query);
     try {
         const q = req.query.query || '';
         const count = req.query.count || 20;
         const cacheKey = 'cilizmusicsearch_' + q.toLowerCase().trim() + '_' + count;
         const cachedSearch = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(cacheKey);
         if (cachedSearch) {
-            DEBUG_GAME_LOGS && debugGame('WS: ciliz-music axtarisi keshden - ' + q);
             return res.json(JSON.parse(cachedSearch.value));
         }
         let youtubeResults = [];
@@ -1040,7 +1040,6 @@ app.get('/api/ciliz-music/search', async (req, res) => {
             };
           });
         } catch (ytErr) {
-          DEBUG_GAME_LOGS && debugGame('WS: ytsr axtaris xetasi - ' + ytErr.message);
         }
         if (!youtubeResults || youtubeResults.length === 0) {
           try {
@@ -1057,7 +1056,6 @@ app.get('/api/ciliz-music/search', async (req, res) => {
             }));
             DEBUG_GAME_LOGS && debugGame('WS: youtubei.js elave etdi, say=' + youtubeResults.length);
           } catch (itErr) {
-            DEBUG_GAME_LOGS && debugGame('WS: youtubei.js xetasi - ' + itErr.message);
           }
         }
 
@@ -1084,16 +1082,14 @@ app.get('/api/ciliz-music/search', async (req, res) => {
                   url: 'https://www.youtube.com/watch?v=' + item.id,
                   provider: 'cz'
                 }));
-                DEBUG_GAME_LOGS && debugGame('WS: youtube-api fallback ile tapildi - ' + q + ' - ' + youtubeResults.length + ' dene');
               }
             } catch (fbErr) {
-              DEBUG_GAME_LOGS && debugGame('WS: youtube-api fallback xetasi - ' + fbErr.message);
             }
           }
         }db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(cacheKey, JSON.stringify(youtubeResults));
         res.json(youtubeResults);
     } catch (error) {
-        console.error('ciliz-music search error:', error);
+        console.error('ciliz-music search failed');
         res.json([]);
     }
 });
@@ -1142,17 +1138,12 @@ app.get('/api/youtube/search', async (req, res) => {
         const cacheKey = 'ytsearch_' + q.toLowerCase().trim() + '_' + count;
         const cachedSearch = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(cacheKey);
         if (cachedSearch) {
-            DEBUG_GAME_LOGS && debugGame('WS: youtube axtaris keshden - ' + q);
             return res.json(JSON.parse(cachedSearch.value));
         }
         let finalResults = [];
         try {
-          DEBUG_GAME_LOGS && debugGame('YTSR-DEBUG: axtaris bawladi - ' + q);
           const searchResult = await ytsr(q, { limit: Number(count) + 10 });
           DEBUG_GAME_LOGS && debugGame('YTSR-DEBUG: total_items=' + searchResult.items.length);
-          if (searchResult.items[0]) {
-            DEBUG_GAME_LOGS && debugGame('YTSR-DEBUG: first_item=' + JSON.stringify(searchResult.items[0]).substring(0, 500));
-          }
           const videos = searchResult.items.filter(item => item.type === 'video');
           finalResults = videos.slice(0, count).map(item => {
             const idMatch = item.url.match(/[?&]v=([^&]+)/);
@@ -1169,7 +1160,6 @@ app.get('/api/youtube/search', async (req, res) => {
             };
           });
         } catch (ytErr) {
-          DEBUG_GAME_LOGS && debugGame('WS: ytsr axtaris xetasi - ' + ytErr.message);
         }
         if (!finalResults || finalResults.length === 0) {
           try {
@@ -1184,7 +1174,6 @@ app.get('/api/youtube/search', async (req, res) => {
             }));
             DEBUG_GAME_LOGS && debugGame('WS: youtubei.js elave etdi, say=' + youtubeResults.length);
           } catch (itErr) {
-            DEBUG_GAME_LOGS && debugGame('WS: youtubei.js xetasi - ' + itErr.message);
           }
         }
         if (!finalResults || finalResults.length === 0) {
@@ -1209,17 +1198,16 @@ app.get('/api/youtube/search', async (req, res) => {
                   icon: req.protocol + '://' + req.get('host') + '/api/thumbnail/' + item.id,
                   duration: parseYoutubeDuration(item.contentDetails.duration)
                 }));
-                DEBUG_GAME_LOGS && debugGame('WS: youtube-api fallback (klip) ile tapildi - ' + q + ' - ' + finalResults.length + ' dene');
               }
             } catch (fbErr2) {
-              DEBUG_GAME_LOGS && debugGame('WS: youtube-api fallback (klip) xetasi - ' + fbErr2.message);
+              DEBUG_GAME_LOGS && debugGame('YouTube search fallback failed');
             }
           }
         }
         if (finalResults && finalResults.length > 0) { db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(cacheKey, JSON.stringify(finalResults)); }
         res.json(finalResults);
     } catch (error) {
-        console.error('youtube search error:', error);
+        console.error('youtube search failed');
         res.json([]);
     }
 });;app.get('/api/youtube/vimeo/search', async (req, res) => {
@@ -1229,7 +1217,7 @@ app.get('/api/youtube/search', async (req, res) => {
         const cacheKey = 'vimeosearch_' + q.toLowerCase().trim() + '_' + count;
         const cachedSearch = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(cacheKey);
         if (cachedSearch) {
-            DEBUG_GAME_LOGS && debugGame('WS: vimeo-klip axtarisi keshden - ' + q);
+            DEBUG_GAME_LOGS && debugGame('Vimeo search cache hit');
             return res.json(JSON.parse(cachedSearch.value));
         }
         const results = await searchVimeo(q, count);
@@ -1540,7 +1528,7 @@ function addDailyLeagueScore(userId, amount) {
       url: item.link,
       provider: 'vimeo'
     }));
-    DEBUG_GAME_LOGS && debugGame('WS: vimeo-dan mahni tapildi - ' + query + ' - ' + mapped.length + ' dene');
+    DEBUG_GAME_LOGS && debugGame('Vimeo result count: ' + mapped.length);
     return mapped;
   } catch (vimeoErr) {
     DEBUG_GAME_LOGS && debugGame('WS: vimeo axtaris xetasi - ' + vimeoErr.message);
@@ -3072,7 +3060,7 @@ if (msg.type === 'game_chat_message') {
           msg.sender = { id: ws.gamePlayer.id, name: ws.gamePlayer.name, male: ws.gamePlayer.male, photo_url: ws.gamePlayer.photo_url };
           msg.start_timestamp = Date.now();
           msg.song_id = msg.id;
-          if (msg.provider === 'cz') {
+          if (msg.provider === 'cz' && !/^https:\/\/music-cdn-wp\.ciliz\.com\//.test(msg.url || '')) {
             try {
               const cacheKey = ((msg.artist || '') + '|' + (msg.title || '')).toLowerCase().trim();
               const cached = db.prepare('SELECT * FROM youtube_cache WHERE song_key = ?').get(cacheKey);
