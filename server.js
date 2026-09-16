@@ -289,8 +289,7 @@ app.get('/api/avatar/:id', async (req, res) => {
       const user = db.prepare('SELECT avatar_data FROM users WHERE id = ?').get(req.params.id);
       if (!user || !user.avatar_data || user.avatar_data.includes('no_profil')) return fallback();
       if (/^https?:\/\//.test(user.avatar_data)) {
-        const avatar = await remoteAvatar(user.avatar_data);
-        return avatar ? res.type(avatar.type).send(avatar.body) : fallback();
+        return res.redirect(user.avatar_data);
       }
       const matches = user.avatar_data.match(/^data:(image\/\w+);base64,(.+)$/);
       if (!matches) return fallback();

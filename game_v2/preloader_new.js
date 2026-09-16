@@ -89177,6 +89177,12 @@ class MiscMenuButton extends HeaderButton {
     }
   }
 }
+const ui_btn_exitinline_namespaceObject = "data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz48c3ZnIHZlcnNpb249IjEuMSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB4PSIwcHgiIHk9IjBweCIgd2lkdGg9IjM2IiBoZWlnaHQ9IjM2IiB2aWV3Qm94PSIwIDAgMzYgMzYiIHhtbDpzcGFjZT0icHJlc2VydmUiPjxwYXRoIGZpbGw9IiNGRkZGRkYiIGQ9Ik0xNSA4SDlhMiAyIDAgMCAwLTIgMnYxNmEyIDIgMCAwIDAgMiAyaDZ2LTNIOVYxMWg2Vjh6Ii8+PHBhdGggZmlsbD0iI0ZGRkZGRiIgZD0iTTI0LjUgMTNsLTIuMSAyLjEgMi45IDIuOUgxM3YzaDEyLjNsLTIuOSAyLjkgMi4xIDIuMSA2LjUtNi41eiIvPjwvc3ZnPg==";
+class ExitButton extends HeaderButton {
+  constructor(animationLayer) {
+    super(animationLayer, new SVGIcon(ui_btn_exitinline_namespaceObject));
+  }
+}
 class SettingsButton extends HeaderButton {
   constructor(animationLayer) {
     super(animationLayer, new SVGIcon(ui_btn_settingsinline_namespaceObject));
@@ -89859,7 +89865,6 @@ class TableUserView extends PixiTransformable {
   }
   setMale(male) {}
   setPhotoUrl(photoUrl) {
-    if (this.photoUrl === photoUrl) return;
     this.photoUrl = photoUrl;
     this.updatePhoto();
   }
@@ -100318,6 +100323,7 @@ class TableView {
     this.btnHeart = new HeartButton(this);
     this.btnMiscMenu = new MiscMenuButton(this);
     this.btnSettings = new SettingsButton(this);
+    this.btnExit = new ExitButton(this);
     this.btnFullscreen = new FullscreenButton(this);
     this.btnLeague = new LeagueButton(this);
     this.btnBottlePass = new BottlePassButton(this);
@@ -100711,7 +100717,7 @@ class TableView {
   }
   createHeaderLayer() {
     const headerLayer = new pixi_js_lib.Container();
-    this.buttonsContainer.addChild(this.btnBottlePass, this.btnRoulette, this.btnLeague, this.btnMiscMenu, this.btnSettings, this.btnFullscreen);
+    this.buttonsContainer.addChild(this.btnBottlePass, this.btnRoulette, this.btnLeague, this.btnMiscMenu, this.btnSettings, this.btnFullscreen, this.btnExit);
     if (this.isTutorial) {
       headerLayer.addChild(this.btnChangeTable);
     } else {
@@ -137808,6 +137814,10 @@ class SessionFactory {
       }).call();
     }))();
     tableView.btnSettings.setOnClick(() => this.settings.show());
+    tableView.btnExit.setOnClick(() => {
+      const __tok = localStorage.getItem('authToken') || '';
+      window.location.href = '/profile-v2' + (__tok ? ('?t=' + encodeURIComponent(__tok)) : '');
+    });
     if (social instanceof TGSocial) {
       social.setOnSettings(() => this.settings.show());
     }
@@ -140144,38 +140154,22 @@ class PhotoLoader {
     this.timeout = null;
     this.defaultPhotoFallbackTimeout = 10000;
     this.successfullyLoaded = {};
-    this.photoRequests = new Map();
-    this.photoCache = new Map();
-    this.backgroundRequests = new WeakMap();
-    this.imageRequests = new Map();
   }
   load(url) {
     return __awaiter(this, void 0, void 0, function* () {
-      const key = this.fixOrFallbackToDefault(url);
-      if (this.photoCache.has(key)) return this.photoCache.get(key).cloneNode(true);
-      let request = this.photoRequests.get(key);
-      if (!request) {
-        request = this.tryLoadFromUrls(key, 'PhotoLoader.load').then(result => {
-          return result ? result.img : this.safeLoadIMG_HTML(ui_default_photoinline_namespaceObject);
-        }).then(img => {
-          if (this.photoCache.size >= 256) this.photoCache.delete(this.photoCache.keys().next().value);
-          this.photoCache.set(key, img);
-          return img;
-        }).finally(() => this.photoRequests.delete(key));
-        this.photoRequests.set(key, request);
-      }
-      return (yield request).cloneNode(true);
-
+      const result = yield this.tryLoadFromUrls(url, 'PhotoLoader.load');
+      if (result) return result.img;
+      return yield this.safeLoadIMG_HTML(ui_default_photoinline_namespaceObject);
     });
   }
   loadDefaultPhoto() {
     return __awaiter(this, void 0, void 0, function* () {
-      return yield this.load(ui_default_photoinline_namespaceObject);
+      return yield this.safeLoadIMG_HTML(ui_default_photoinline_namespaceObject);
     });
   }
   loadIgnorePhoto() {
     return __awaiter(this, void 0, void 0, function* () {
-      return yield this.load(ui_ignore_photoinline_namespaceObject);
+      return yield this.safeLoadIMG_HTML(ui_ignore_photoinline_namespaceObject);
     });
   }
   safeLoadIMG_HTML(url) {
@@ -140206,20 +140200,26 @@ class PhotoLoader {
   tryLoadBG(el, url) {
     return __awaiter(this, void 0, void 0, function* () {
       url = this.fixOrFallbackToDefault(url);
-      if (this.backgroundRequests.get(el)?.url === url) return this.backgroundRequests.get(el).promise;
       el.style.backgroundColor = '#dde8ed';
       el.style.backgroundImage = `url(${url})`;
       yield this.fallbackLoadBG(el, url);
     });
   }
   fallbackLoadBG(el, url) {
-    if (this.backgroundRequests.get(el)?.url === url) return this.backgroundRequests.get(el).promise;
-    const state = { url, promise: null };
-    this.backgroundRequests.set(el, state);
-    state.promise = this.load(url).then(img => {
-      if (this.backgroundRequests.get(el) === state) el.style.backgroundImage = `url(${img.src})`;
+    return __awaiter(this, void 0, void 0, function* () {
+      let result = null;
+      const loadPromise = this.tryLoadFromUrls(url, 'PhotoLoader.fallbackLoadBG');
+      delay(this.defaultPhotoFallbackTimeout).then(() => {
+        if (result) return;
+        el.style.backgroundImage = `url(${ui_default_photoinline_namespaceObject})`;
+      });
+      result = yield loadPromise;
+      if (!result) {
+        el.style.backgroundImage = `url(${ui_default_photoinline_namespaceObject})`;
+        return;
+      }
+      el.style.backgroundImage = `url(${result.loadedUrl})`;
     });
-    return state.promise;
   }
   tryLoadFromUrls(url, errorContext) {
     return __awaiter(this, void 0, void 0, function* () {
@@ -140344,22 +140344,17 @@ class PhotoLoader {
     });
   }
   loadIMG_HTML(url) {
-    if (this.imageRequests.has(url)) return this.imageRequests.get(url).then(img => img.cloneNode(true));
-    const request = new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       const imgEl = document.createElement('img');
       imgEl.crossOrigin = this.crossOrigin;
-      const timer = setTimeout(() => { imgEl.onload = imgEl.onerror = null; imgEl.src = ''; reject(new Error('photo_timeout')); }, this.timeout || 10000);
-      imgEl.onload = () => { clearTimeout(timer); resolve(imgEl); };
+      imgEl.onload = () => resolve(imgEl);
       imgEl.onerror = e => {
-        clearTimeout(timer);
         imgEl.onerror = null;
         console.error(`Failed to photo loadIMG_HTML ${url}`);
         reject(new Error(`Failed to load photo`));
       };
       imgEl.src = url;
-    }).finally(() => this.imageRequests.delete(url));
-    this.imageRequests.set(url, request);
-    return request.then(img => img.cloneNode(true));
+    });
   }
   fixOrFallbackToDefault(url) {
     if (!url) return ui_default_photoinline_namespaceObject;
